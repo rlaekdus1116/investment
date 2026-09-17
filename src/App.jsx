@@ -520,7 +520,7 @@ function PlayGame({ mode, onBack }) {
           <Portfolio rec={rec} />
           {(rec.history || []).length >= 2 && <NetWorthChart history={rec.history} />}
         </div>
-        <div>
+        <div style={{ width: "100%", maxWidth: 640, justifySelf: "center" }}>
           {step === "invest" && <InvestScreen rec={rec} onSubmit={confirmInvest} onChangeJob={() => setStep("rejob")} onShowBudget={() => openBudget(rec)} />}
 
           {step === "waiting" && (
