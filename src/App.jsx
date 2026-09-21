@@ -208,8 +208,12 @@ const DIV_YIELD = 0.03, BOND_COUPON = 0.03, LOAN_SPREAD = 0.03, INS_PREMIUM = 3,
 const loanRate = (rate) => rate + LOAN_SPREAD;
 
 const GKEY = "mg:game";
+const SELF_KEY = "mg:self"; // 재접속용: 내 학생 id/이름 (이 기기에만 저장)
 const pkey = (id) => `mg:p:${id}`;
 function syncSafe(id, obj) { sSet(pkey(id), { ...obj }); }
+const saveSelf = (id, name) => { try { localStorage.setItem(SELF_KEY, JSON.stringify({ id, name })); } catch {} };
+const loadSelf = () => { try { return JSON.parse(localStorage.getItem(SELF_KEY) || "null"); } catch { return null; } };
+const clearSelf = () => { try { localStorage.removeItem(SELF_KEY); } catch {} };
 
 const fmt = (units) => {
   const man = Math.round(units) * UNIT;
@@ -446,6 +450,32 @@ function PlayGame({ mode, onBack }) {
   const write = (r) => syncSafe(idRef.current, { ...r, id: idRef.current, name });
   const openBudget = (r) => setBudget({ income: r.income, age: r.age });
 
+  /* 재접속: 새로고침/재접속 시 같은 학생으로 이어하기 (이 기기에 저장된 id 사용) */
+  useEffect(() => {
+    if (!isClass) return;
+    const saved = loadSelf();
+    if (!saved || !saved.id) return;
+    let alive = true;
+    (async () => {
+      const rec0 = await sGet(pkey(saved.id));
+      const g = await sGet(GKEY);
+      if (!alive) return;
+      if (!rec0 || !g) { clearSelf(); return; } // 초기화됨 → 새로 시작
+      idRef.current = saved.id;
+      setName(saved.name || rec0.name || "");
+      setRec(rec0); recRef.current = rec0;
+      setRound(g.round || 1); roundRef.current = g.round || 1;
+      setRate(g.rate ?? DEFAULT_RATE); rateRef.current = g.rate ?? DEFAULT_RATE;
+      setPhase(g.phase);
+      if (rec0.bankrupt) { setStep("dead"); return; }
+      if (g.phase === "end") return;
+      const ids = g.newsIds || (g.newsId ? [g.newsId] : []);
+      if (g.phase === "news" && ids.length) { setEvents(ids.map(eventById).filter(Boolean)); setStep("news"); }
+      else setStep(rec0.ready ? "waiting" : "invest");
+    })();
+    return () => { alive = false; };
+  }, [isClass]);
+
   useEffect(() => {
     if (!isClass) return;
     let active = true;
@@ -481,7 +511,7 @@ function PlayGame({ mode, onBack }) {
     const r = startRound(base, rnd, rt);
     r.history = [{ round: rnd, age: r.age, net: netWorth(r) }];
     setRec(r); recRef.current = r; setStep("invest"); openBudget(r);
-    if (isClass) write(r);
+    if (isClass) { write(r); saveSelf(idRef.current, name); }
   };
 
   const confirmInvest = ({ targets, newLoan, repay, insured }) => {
@@ -570,7 +600,7 @@ function PlayGame({ mode, onBack }) {
       </div>
 
       <div style={{ textAlign: "center", marginTop: 18 }}>
-        <Btn small color={C.sub} onClick={() => { if (confirm("처음 화면으로 돌아갈까요?")) { try { sDel(pkey(idRef.current)); } catch {} onBack(); } }}>나가기</Btn>
+        <Btn small color={C.sub} onClick={() => { if (confirm("처음 화면으로 돌아갈까요? (내 진행이 사라져요)")) { try { sDel(pkey(idRef.current)); } catch {} clearSelf(); onBack(); } }}>나가기</Btn>
       </div>
     </div>
   );
@@ -678,7 +708,7 @@ function JobPick({ name, onPickJob, onBack, rejob }) {
         <Title size={24}>{rejob ? "🔄 이직: 새 직업 고르기" : "직업 카드를 1장 고르세요"}</Title>
       </div>
       <p style={{ color: C.sub, marginTop: 6 }}>
-        {rejob ? "주의: 이직하면 이번 해 월급은 받지 못해요. (게임당 1회)" : `${name}님, 카드를 뒤집어 보세요. 고른 카드가 당신의 직업이 됩니다.`}
+        {rejob ? "주의: 이직하면 이번 해 월급은 받지 못하고, 뒤집은 카드로 확정돼요. (게임당 1회)" : `${name}님, 카드 1장을 뒤집으세요. 뒤집는 순간 그 직업으로 확정! (다시 못 골라요)`}
       </p>
       {!picked ? (
         <div style={{ display: "grid", gridTemplateColumns: "repeat(4,1fr)", gap: 12, marginTop: 18 }}>
@@ -703,9 +733,9 @@ function JobPick({ name, onPickJob, onBack, rejob }) {
               월급 {Array.isArray(picked.salary) ? `${fmt(picked.salary[0])}~${fmt(picked.salary[1])}` : fmt(picked.salary)}
             </div>
           </div>
-          <div style={{ display: "flex", gap: 10, justifyContent: "center", marginTop: 20 }}>
-            <Btn color={C.sub} onClick={() => setPicked(null)}>다시 고르기</Btn>
+          <div style={{ display: "flex", flexDirection: "column", gap: 8, alignItems: "center", marginTop: 20 }}>
             <Btn fill onClick={() => onPickJob(picked)}>{rejob ? "이 직업으로 이직! →" : "이 직업으로 시작! →"}</Btn>
+            <span style={{ color: C.sub, fontSize: 11 }}>⚠️ 카드는 한 번 뒤집으면 못 바꿔요 (운명!)</span>
           </div>
         </div>
       )}
