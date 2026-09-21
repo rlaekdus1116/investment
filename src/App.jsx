@@ -1,14 +1,14 @@
 import React, { useState, useEffect, useRef } from "react";
 import { sGet, sSet, sList, sDel, firebaseReady } from "./storage";
+import * as XLSX from "xlsx";
 import {
   ResponsiveContainer, LineChart, Line, XAxis, YAxis, Tooltip, ReferenceLine, CartesianGrid,
 } from "recharts";
 
 /* =========================================================
    머니 서바이벌 2 — 인생 대모험 (생애주기 서바이벌)
-   · 혼자 연습: 한 화면에서 인생 전체(28세→노후)를 진행
-   · 수업 참여: 다연쌤이 '한 해 넘기기 / 속보'를 눌러 전원 동시 진행
-   · 다연쌤: 라운드·금리·속보 제어 + 실시간 현황판 (비밀번호 991116)
+   · 혼자 연습 / 수업 참여(다연쌤 진행) / 다연쌤 화면(비번 991116)
+   · 자산 사고팔기(리밸런싱) · 속보 2개 동시 · 엑셀 저장 · 블랙스완 스케일링
    1 단위 = 10만원 · 1 라운드 = 4년 · 갤탭 가로 2단 레이아웃
    ========================================================= */
 
@@ -28,7 +28,6 @@ const FONT = `
 @keyframes floaty { 0%,100%{transform:translateY(0)} 50%{transform:translateY(-6px)} }
 @keyframes modalPop { 0%{transform:scale(.9) translateY(10px);opacity:0} 100%{transform:scale(1) translateY(0);opacity:1} }
 
-/* ── 갤탭 가로 대응 2단 레이아웃 ── */
 .msWrap { max-width: 1160px; margin: 0 auto; padding: 16px; }
 .msCols { display: grid; gap: 14px; grid-template-columns: 1fr; }
 .msLeft { display: grid; gap: 10px; align-content: start; }
@@ -75,86 +74,113 @@ const ASSETS = [
 ];
 const assetName = (k) => (k === "parents" ? "부모님 효도" : ASSETS.find((a) => a.key === k)?.name || k);
 
-/* 분산투자 항목 · 환금성(유동성) 안내 포함 */
+/* 투자 항목 (checking 제외). sell:false = 팔 수 없음(장기·못 무름) */
 const ALLOC = [
-  { key: "bitcoin", name: "비트코인", emoji: "₿", color: "#f7931a", hint: "고위험 고수익 · 언제든 현금화", why: "수익성" },
-  { key: "stock", name: "주식", emoji: "📈", color: "#34d399", hint: "중위험 · 배당 나옴 · 바로 현금화", why: "수익성" },
-  { key: "bond", name: "채권", emoji: "📃", color: "#0ea5e9", hint: "나라·회사에 빌려주고 이자 받기 · 안전한 편 · 금리 오르면 값↓", why: "안전성" },
-  { key: "savings", name: "적금", emoji: "🏦", color: "#60a5fa", hint: "안전·이자 · 중도해지 손해", why: "안전성" },
-  { key: "pension", name: "연금", emoji: "🧓", color: "#eab308", hint: "노후 대비 장기저축 · 아주 안전 · 급할 때 쓰기 어려움", why: "안전성" },
-  { key: "realestate", name: "부동산", emoji: "🏠", color: "#f472b6", hint: "묵직·인플레 방어 · 팔기 느림(현금화 어려움)", why: "수익성" },
-  { key: "luxury", name: "명품", emoji: "👜", color: "#c084fc", hint: "감가 위험 · 리셀 대박도", why: "수익성" },
-  { key: "parents", name: "부모님 용돈", emoji: "🎁", color: "#fb7185", hint: "효도지수↑ (가끔 목돈 보답)", why: "효도" },
-  { key: "checking", name: "입출금통장", emoji: "💳", color: "#94a3b8", hint: "그냥 보관 (변동 없음)", why: "유동성" },
+  { key: "bitcoin", name: "비트코인", emoji: "₿", color: "#f7931a", hint: "고위험 고수익 · 언제든 사고팔기", sell: true },
+  { key: "stock", name: "주식", emoji: "📈", color: "#34d399", hint: "중위험 · 배당 · 자유롭게 매매", sell: true },
+  { key: "bond", name: "채권", emoji: "📃", color: "#0ea5e9", hint: "이자 받는 안전자산 · 금리 오르면 값↓", sell: true },
+  { key: "savings", name: "적금", emoji: "🏦", color: "#60a5fa", hint: "안전·이자 · 자유롭게 조정", sell: true },
+  { key: "pension", name: "연금", emoji: "🧓", color: "#eab308", hint: "노후 대비 장기저축 · 아주 안전 · 못 팜(장기)", sell: false },
+  { key: "realestate", name: "부동산", emoji: "🏠", color: "#f472b6", hint: "인플레 방어 · 팔 순 있지만 급할 땐 현금화 어려움", sell: true },
+  { key: "luxury", name: "명품", emoji: "👜", color: "#c084fc", hint: "감가 위험 · 리셀 대박도 · 매매 가능", sell: true },
+  { key: "parents", name: "부모님 용돈", emoji: "🎁", color: "#fb7185", hint: "효도지수↑ (가끔 목돈 보답) · 못 무름", sell: false },
 ];
+const INVEST_KEYS = ALLOC.map((a) => a.key);
 
 const CAT = { 경제: "#e8c14d", 국제: "#60a5fa", IT: "#34d399", 부동산: "#fb923c", 사회: "#c084fc", 건강: "#ef4444" };
 
-/* ====== 속보 이벤트 ====== */
+/* ====== 속보 이벤트 ======
+   returns: 자산 등락 · rateDelta: 금리 · parentsReturn/pensionBonus: 보너스
+   swan: 블랙스완 { label, base, pct(자산비례), coverage } */
 const EVENTS = [
+  /* 비트코인 */
   { id: "btc_etf", cat: "경제", icon: "🚀", title: "비트코인 현물 ETF에 기관 자금 폭발… 코인시장 환호",
     body: "글로벌 대형 운용사들이 일제히 코인 매수에 나섰습니다. '디지털 금' 내러티브가 부활했습니다.",
-    ticker: "비트코인 +60%·역대급 거래량·공포탐욕지수 '극도의 탐욕'",
-    returns: { bitcoin: 0.6, stock: 0.05, savings: 0.004 } },
+    ticker: "비트코인 +60%·역대급 거래량·공포탐욕지수 '극도의 탐욕'", returns: { bitcoin: 0.6, stock: 0.05 } },
+  { id: "btc_hack", cat: "IT", icon: "🕳️", title: "대형 코인 거래소 해킹… 코인 투자자 패닉",
+    body: "해킹으로 자산이 유출됐다는 소식에 코인 시장이 급락했습니다. '내 돈은 안전할까' 공포가 번집니다.",
+    ticker: "비트코인 -40%·거래소 출금중단·투자자 패닉", returns: { bitcoin: -0.4, stock: -0.03 } },
+  /* 주식 */
   { id: "ai_boom", cat: "IT", icon: "🤖", title: "AI 반도체 슈퍼사이클… 기술주 폭등",
     body: "AI 수요 폭발로 관련 기업 실적 전망이 상향됐습니다. 기술주 중심으로 매수세가 몰렸습니다.",
-    ticker: "기술주 +42%·AI 반도체 품귀·어닝 서프라이즈",
-    returns: { stock: 0.42, bitcoin: 0.06, savings: 0.004 } },
-  { id: "housing_up", cat: "부동산", icon: "🏗️", title: "역세권 아파트값 급등… '지금 아니면 못 산다' 패닉바잉",
-    body: "공급 부족과 저금리 기대가 겹치며 집값이 뛰었습니다. 부동산을 가진 사람만 웃었습니다.",
-    ticker: "부동산 +30%·청약 경쟁률 최고·전세도 상승",
-    returns: { realestate: 0.30, stock: 0.02 } },
-  { id: "luxury_resell", cat: "사회", icon: "👜", title: "한정판 명품 리셀가 폭등… 매장마다 '오픈런'",
-    body: "인기 브랜드의 가격 인상과 품귀가 맞물리며 중고 명품 시세가 치솟았습니다.",
-    ticker: "명품 +28%·오픈런 대란·리셀 거래 폭주",
-    returns: { luxury: 0.28, stock: 0.03, savings: 0.004 } },
+    ticker: "기술주 +42%·AI 반도체 품귀·어닝 서프라이즈", returns: { stock: 0.42, bitcoin: 0.06 } },
+  { id: "stock_crash", cat: "경제", icon: "📉", title: "경기침체 공포·실적 쇼크… 증시 급락",
+    body: "경기 둔화 우려에 기업 실적이 꺾이자 주식시장이 큰 폭으로 하락했습니다. 안전자산으로 돈이 이동합니다.",
+    ticker: "코스피 -30%·실적 쇼크·안전자산 채권 강세", returns: { stock: -0.3, bond: 0.04 } },
+  { id: "dividend", cat: "경제", icon: "💵", title: "주주환원 확대… 배당주에 뭉칫돈",
+    body: "기업들이 배당을 늘리겠다고 발표하자 배당주가 강세를 보였습니다. 꾸준한 현금흐름이 매력으로 떠올랐습니다.",
+    ticker: "배당주 +15%·주주환원 확대·장기투자 부각", returns: { stock: 0.15 } },
+  /* 채권 */
+  { id: "bond_rush", cat: "국제", icon: "🛟", title: "불확실성에 안전자산 선호… 국채에 뭉칫돈",
+    body: "시장 불안이 커지자 안전한 채권으로 돈이 몰렸습니다. 위험자산은 소폭 조정을 받았습니다.",
+    ticker: "채권 +7%·안전자산 선호·주식 소폭 조정", returns: { bond: 0.07, stock: -0.03, bitcoin: -0.05 } },
+  /* 적금 */
   { id: "savings_gift", cat: "사회", icon: "🏦", title: "정부, 청년 적금 이자 두 배 우대 정책 발표",
     body: "안정적 자산 형성을 돕기 위한 파격 정책이 나왔습니다. 적금 가입자에게 추가 이자가 지급됩니다.",
-    ticker: "적금 우대금리 지급·가입 문의 폭주",
-    returns: { savings: 0.06, bond: 0.02 } },
-  { id: "rate_up", cat: "경제", icon: "📉", title: "기준금리 깜짝 인상… 코인·증시 동반 급락, 대출자 비명",
+    ticker: "적금 우대금리 지급·가입 문의 폭주", returns: { savings: 0.06, bond: 0.02 } },
+  /* 연금 */
+  { id: "pension_tax", cat: "사회", icon: "🧓", title: "노후 대비 붐… 연금저축 세액공제 확대",
+    body: "정부가 연금저축 세제 혜택을 늘렸습니다. 미리 연금을 부어둔 사람에게 보너스가 돌아갑니다.",
+    ticker: "연금저축 세액공제 확대·노후 준비 열풍", pensionBonus: 0.08 },
+  /* 부동산 */
+  { id: "housing_up", cat: "부동산", icon: "🏗️", title: "역세권 아파트값 급등… '지금 아니면 못 산다' 패닉바잉",
+    body: "공급 부족과 저금리 기대가 겹치며 집값이 뛰었습니다. 부동산을 가진 사람만 웃었습니다.",
+    ticker: "부동산 +30%·청약 경쟁률 최고·전세도 상승", returns: { realestate: 0.3, stock: 0.02 } },
+  { id: "housing_down", cat: "부동산", icon: "🏚️", title: "전세사기·미분양 공포… 집값 하락",
+    body: "전세사기와 미분양이 겹치며 부동산 심리가 얼어붙었습니다. 집값이 하락하고 거래가 끊겼습니다.",
+    ticker: "부동산 -22%·미분양 급증·거래 절벽", returns: { realestate: -0.22 } },
+  /* 명품 */
+  { id: "luxury_resell", cat: "사회", icon: "👜", title: "한정판 명품 리셀가 폭등… 매장마다 '오픈런'",
+    body: "인기 브랜드의 가격 인상과 품귀가 맞물리며 중고 명품 시세가 치솟았습니다.",
+    ticker: "명품 +28%·오픈런 대란·리셀 거래 폭주", returns: { luxury: 0.28 } },
+  { id: "luxury_down", cat: "사회", icon: "📦", title: "리셀 규제·경기 둔화… 명품 시세 급락",
+    body: "리셀 시장 규제와 소비 위축이 겹치며 명품 되팔이 값이 크게 떨어졌습니다.",
+    ticker: "명품 -20%·리셀 규제·소비 둔화", returns: { luxury: -0.2 } },
+  /* 금리 */
+  { id: "rate_up", cat: "경제", icon: "📊", title: "기준금리 깜짝 인상… 코인·증시 급락, 대출자 비명",
     body: "중앙은행이 예상을 깨고 금리를 크게 올렸습니다. 위험자산에서 돈이 빠지고 대출 이자가 치솟습니다. 채권 값도 내려갑니다.",
     ticker: "비트코인 -45%·코스피 약세·채권값↓·대출금리 급등·예적금은 상승",
-    returns: { bitcoin: -0.45, stock: -0.14, realestate: -0.10, bond: -0.06, savings: 0.012, luxury: -0.03 },
-    rateDelta: 0.02 },
-  { id: "hyperinflation", cat: "경제", icon: "🌡️", title: "초인플레이션 공포… 대출이자 눈덩이, 영끌족 초비상",
-    body: "물가가 통제를 벗어나자 금리가 다시 뛰었습니다. 빚으로 투자한 사람들의 이자 부담이 폭발합니다.",
-    ticker: "금리 급등·대출이자 눈덩이·채권값↓·현금가치 하락·실물 상승",
-    returns: { bitcoin: -0.20, stock: -0.10, realestate: 0.05, bond: -0.08, luxury: 0.08, savings: 0.005, checking: -0.06 },
-    rateDelta: 0.03 },
+    returns: { bitcoin: -0.45, stock: -0.14, realestate: -0.1, bond: -0.06, savings: 0.012, luxury: -0.03 }, rateDelta: 0.02 },
   { id: "rate_cut", cat: "경제", icon: "🕊️", title: "경기 부양 위해 금리 인하… 위험자산·채권에 훈풍",
     body: "중앙은행이 금리를 내리자 대출 부담이 줄고 투자 심리가 살아났습니다. 금리가 내리면 채권 값은 올라갑니다.",
     ticker: "금리 인하·대출이자 완화·증시·코인 반등·채권값↑",
-    returns: { stock: 0.12, bitcoin: 0.15, realestate: 0.06, bond: 0.07 },
-    rateDelta: -0.02 },
+    returns: { stock: 0.12, bitcoin: 0.15, realestate: 0.06, bond: 0.07 }, rateDelta: -0.02 },
+  { id: "hyperinflation", cat: "경제", icon: "🌡️", title: "초인플레이션 공포… 대출이자 눈덩이, 영끌족 초비상",
+    body: "물가가 통제를 벗어나자 금리가 다시 뛰었습니다. 빚으로 투자한 사람들의 이자 부담이 폭발합니다.",
+    ticker: "금리 급등·대출이자 눈덩이·채권값↓·현금가치 하락·실물 상승",
+    returns: { bitcoin: -0.2, stock: -0.1, realestate: 0.05, bond: -0.08, luxury: 0.08, checking: -0.06 }, rateDelta: 0.03 },
   { id: "inflation", cat: "경제", icon: "🔥", title: "물가 고공행진… 통장 속 현금 가치 '눈 녹듯'",
     body: "고물가가 이어지며 통장에 묶인 현금의 실질가치가 하락했습니다. 실물·코인이 방어수단으로 주목됩니다.",
     ticker: "물가 6%대·현금가치 하락·실물자산 강세",
-    returns: { bitcoin: 0.18, stock: -0.04, realestate: 0.10, luxury: 0.06, bond: -0.03, savings: -0.005, checking: -0.05 },
-    rateDelta: 0.01 },
-  { id: "crisis", cat: "국제", icon: "🌪️", title: "글로벌 금융위기 공포 확산… 안전자산으로 대피",
-    body: "대형 금융기관 부실 우려가 번지며 전 세계 증시가 동반 폭락했습니다. 빚투자자들은 반대매매 위기에 몰렸고, 안전한 채권으로 돈이 몰렸습니다.",
-    ticker: "코스피 -38%·비트코인 -35%·부동산 급랭·채권은 강세·반대매매 속출",
-    returns: { bitcoin: -0.35, stock: -0.38, realestate: -0.20, bond: 0.05, savings: 0.0, luxury: -0.18 } },
+    returns: { bitcoin: 0.18, stock: -0.04, realestate: 0.1, luxury: 0.06, bond: -0.03, checking: -0.05 }, rateDelta: 0.01 },
+  /* 위기 */
+  { id: "crisis", cat: "국제", icon: "🌪️", title: "글로벌 금융위기 공포 확산… 자산시장 패닉",
+    body: "대형 금융기관 부실 우려가 번지며 전 세계 증시가 동반 폭락했습니다. 빚투자자는 반대매매 위기, 안전한 채권엔 돈이 몰렸습니다.",
+    ticker: "코스피 -38%·비트코인 -35%·부동산 급랭·채권 강세·반대매매 속출",
+    returns: { bitcoin: -0.35, stock: -0.38, realestate: -0.2, bond: 0.05, luxury: -0.18 } },
+  /* 효도 */
   { id: "filial", cat: "사회", icon: "🎁", title: "'효도 보답' 훈훈… 부모님이 목돈으로 화답",
     body: "그동안 꾸준히 용돈을 드린 자녀들에게 부모님이 목돈을 돌려주는 사례가 화제입니다.",
-    ticker: "효도 누적액의 80% 보답·따뜻한 미담 확산",
-    returns: { savings: 0.004 }, parentsReturn: 0.8 },
-  /* ── 블랙스완 (보험으로 방어) ── */
+    ticker: "효도 누적액의 80% 보답·따뜻한 미담 확산", parentsReturn: 0.8 },
+  /* ── 블랙스완 (자산 비례 피해 · 보험으로 방어) ── */
   { id: "swan_cancer", cat: "건강", icon: "🏥", title: "[블랙스완] 갑작스런 큰 병… 치료비 폭탄",
-    body: "예고 없이 찾아온 큰 병. 목돈이 치료비로 빠져나갑니다. 실비·건강보험이 있다면 대부분 막을 수 있습니다.",
-    ticker: "치료비 급증·간병 부담·보험 가입자만 방어 성공",
-    returns: {}, swan: { label: "치료비", hit: 40 } },
+    body: "예고 없이 찾아온 큰 병. 재산이 클수록 치료·간병비도 커집니다. 실비·건강보험이 있으면 대부분 막습니다.",
+    ticker: "치료비 급증·간병 부담·보험 가입자만 방어 성공", swan: { label: "치료비", base: 30, pct: 0.15 } },
   { id: "swan_accident", cat: "건강", icon: "🚑", title: "[블랙스완] 교통사고… 수리비·병원비 동시에",
     body: "갑작스런 사고로 큰돈이 나갑니다. 보험이 있으면 피해를 크게 줄일 수 있습니다.",
-    ticker: "사고 다발·수리비 폭등·무보험자 직격탄",
-    returns: {}, swan: { label: "사고 피해", hit: 28 } },
+    ticker: "사고 다발·수리비 폭등·무보험자 직격탄", swan: { label: "사고 피해", base: 22, pct: 0.1 } },
+  { id: "swan_fire", cat: "건강", icon: "🔥", title: "[블랙스완] 집·상가에 화재… 복구비 폭탄",
+    body: "예상치 못한 화재로 큰 복구비가 듭니다. 화재보험이 있으면 대부분 보장됩니다.",
+    ticker: "화재 피해 속출·복구비 부담·보험 여부가 갈랐다", swan: { label: "화재 피해", base: 24, pct: 0.12 } },
+  { id: "swan_family", cat: "건강", icon: "🧑‍🦳", title: "[블랙스완] 부모님 큰 수술… 목돈 병원비",
+    body: "가족의 갑작스런 수술로 목돈이 나갑니다. 보험이 있으면 부담을 크게 덜 수 있습니다.",
+    ticker: "가족 의료비 급증·간병 부담·보험이 버팀목", swan: { label: "가족 병원비", base: 18, pct: 0.09 } },
   { id: "swan_fraud", cat: "사회", icon: "🎣", title: "[블랙스완] 투자사기·보이스피싱 기승",
     body: "'원금 보장 고수익'에 속아 큰돈을 날리는 피해가 속출합니다. 의심스러우면 절대 송금 금지!",
-    ticker: "사기 피해 급증·환급 어려움·보험도 일부만 보상",
-    returns: {}, swan: { label: "사기 피해", hit: 34, coverage: 0.5 } },
+    ticker: "사기 피해 급증·환급 어려움·보험도 일부만 보상", swan: { label: "사기 피해", base: 26, pct: 0.13, coverage: 0.5 } },
 ];
 const eventById = (id) => EVENTS.find((e) => e.id === id);
+const evsRateDelta = (evs) => evs.reduce((s, e) => s + (e.rateDelta || 0), 0);
 
 /* ====== 정리 문제 (투자 3원칙) ====== */
 const QUIZ = [
@@ -166,9 +192,7 @@ const QUIZ = [
 ];
 
 /* ====== 생애주기 ====== */
-const START_AGE = 28;
-const YEARS_PER_ROUND = 4;
-const RETIRE_AGE = 60;
+const START_AGE = 28, YEARS_PER_ROUND = 4, RETIRE_AGE = 60;
 const ageForRound = (r) => START_AGE + (r - 1) * YEARS_PER_ROUND;
 function stageForAge(age) {
   if (age < 30) return { key: "s20", label: "사회초년생 (20대)", emoji: "🌱", tone: "#34d399", desc: "첫 월급! 저축 습관이 평생을 좌우해요" };
@@ -179,21 +203,14 @@ function stageForAge(age) {
 }
 const ageFactor = (age) => (age < 30 ? 0.8 : age < 40 ? 1.0 : age < 50 ? 1.3 : age < 60 ? 1.05 : 0);
 const livingCost = (age) => (age < 30 ? 8 : age < 40 ? 18 : age < 50 ? 28 : age < 60 ? 22 : 16);
-const PENSION_BASE = 12;
-const PENSION_BONUS = { 공무원: 10 };
-const DIV_YIELD = 0.03;
-const BOND_COUPON = 0.03;
-const LOAN_SPREAD = 0.03;
-const INS_PREMIUM = 3;
-const DEFAULT_RATE = 0.03;
+const PENSION_BASE = 12, PENSION_BONUS = { 공무원: 10 };
+const DIV_YIELD = 0.03, BOND_COUPON = 0.03, LOAN_SPREAD = 0.03, INS_PREMIUM = 3, DEFAULT_RATE = 0.03;
 const loanRate = (rate) => rate + LOAN_SPREAD;
 
-/* ====== 공유 저장소 키 ====== */
 const GKEY = "mg:game";
 const pkey = (id) => `mg:p:${id}`;
 function syncSafe(id, obj) { sSet(pkey(id), { ...obj }); }
 
-/* ====== 유틸 ====== */
 const fmt = (units) => {
   const man = Math.round(units) * UNIT;
   if (man === 0) return "0원";
@@ -207,13 +224,12 @@ const liquidSum = (p) => LIQUID.reduce((s, k) => s + (p[k] || 0), 0);
 const netWorth = (p) => assetsSum(p) - (p.loan || 0);
 const uid = () => Math.random().toString(36).slice(2, 8) + Date.now().toString(36).slice(-4);
 const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+const randEvent = () => EVENTS[Math.floor(Math.random() * EVENTS.length)];
 
 function stressOf(p) {
-  const assets = assetsSum(p), loan = p.loan || 0;
-  let s = 0;
+  const assets = assetsSum(p), loan = p.loan || 0; let s = 0;
   if (loan > 0) s += clamp((loan / Math.max(1, assets)) * 60, 0, 70);
-  if (netWorth(p) < 0) s = 100;
-  else if (netWorth(p) < 20) s = Math.max(s, 55);
+  if (netWorth(p) < 0) s = 100; else if (netWorth(p) < 20) s = Math.max(s, 55);
   return Math.round(clamp(s, 0, 100));
 }
 function avatarOf(p) {
@@ -225,13 +241,11 @@ function avatarOf(p) {
   return { face: "🙂", label: "차근차근", color: C.blue };
 }
 
-/* ====== 한 해(라운드) 시작: 소득·지출 정산 ====== */
+/* ====== 한 해 시작: 소득·지출 정산 ====== */
 function startRound(prev, round, rate) {
   const p = { ...prev };
-  const age = ageForRound(round);
-  const retired = age >= RETIRE_AGE;
-  const job = jobByName(p.job);
-  let work = retired ? PENSION_BASE + (PENSION_BONUS[p.job] || 0) : Math.round(rollSalary(job) * ageFactor(age));
+  const age = ageForRound(round), retired = age >= RETIRE_AGE, job = jobByName(p.job);
+  const work = retired ? PENSION_BASE + (PENSION_BONUS[p.job] || 0) : Math.round(rollSalary(job) * ageFactor(age));
   const interest = Math.round((p.savings || 0) * rate);
   const bondCoupon = Math.round((p.bond || 0) * BOND_COUPON);
   const dividend = Math.round((p.stock || 0) * DIV_YIELD);
@@ -250,9 +264,8 @@ function startRound(prev, round, rate) {
   return p;
 }
 
-/* ====== 속보 정산: 등락 + 블랙스완 + 반대매매 + 파산판정 ======
-   전달된 record(r)를 직접 수정합니다. 호출부에서 사본을 넘기세요. (연금은 시장/블랙스완 영향 없음) */
-function applyNews(r, event, round) {
+/* ====== 이벤트 1개 효과 (record 직접 수정, 마진콜은 나중에) ====== */
+function applyEventEffects(r, event) {
   const lines = []; let total = 0;
   const ret = event.returns || {};
   ["bitcoin", "stock", "bond", "savings", "realestate", "luxury", "checking"].forEach((k) => {
@@ -260,46 +273,54 @@ function applyNews(r, event, round) {
     if (before <= 0 && rate === 0) return;
     const after = Math.max(0, Math.round(before * (1 + rate)));
     const diff = after - before; r[k] = after; total += diff;
-    if (before > 0) lines.push({ key: k, before, after, diff, rate }); // 실제 보유한 자산만 표시
+    if (before > 0) lines.push({ key: k, before, after, diff, rate });
   });
   if (event.parentsReturn && (r.parents || 0) > 0) {
     const bonus = Math.round(r.parents * event.parentsReturn);
     r.checking += bonus; total += bonus;
     lines.push({ key: "parents", before: 0, after: bonus, diff: bonus, rate: event.parentsReturn, isParents: true });
   }
-  /* 블랙스완 */
+  if (event.pensionBonus && (r.pension || 0) > 0) {
+    const bonus = Math.round(r.pension * event.pensionBonus);
+    r.pension += bonus; total += bonus;
+    lines.push({ key: "pension", before: 0, after: bonus, diff: bonus, rate: event.pensionBonus, isBonus: true });
+  }
   let swan = null;
   if (event.swan) {
-    const raw = event.swan.hit;
+    const raw = Math.round((event.swan.base || 0) + (event.swan.pct || 0) * liquidSum(r));
     const coverRate = event.swan.coverage != null ? event.swan.coverage : 0.9;
     const covered = r.insured ? Math.round(raw * coverRate) : 0;
     const damage = raw - covered;
-    let rem = damage, fromLiquid = 0;
+    let rem = damage;
     for (const k of ["checking", "savings", "bond", "stock", "bitcoin", "realestate", "luxury"]) {
       if (rem <= 0) break;
-      const take = Math.min(r[k] || 0, rem); r[k] = (r[k] || 0) - take; rem -= take; fromLiquid += take;
+      const take = Math.min(r[k] || 0, rem); r[k] = (r[k] || 0) - take; rem -= take;
     }
     let toLoan = 0;
-    if (rem > 0) { toLoan = rem; r.loan = (r.loan || 0) + rem; } // 현금화할 게 없으면 빚
+    if (rem > 0) { toLoan = rem; r.loan = (r.loan || 0) + rem; }
     total -= damage;
     swan = { label: event.swan.label, raw, covered, damage, insured: !!r.insured, toLoan };
   }
-  /* 반대매매(마진콜): 빚 대비 (연금 뺀) 자산이 너무 쪼그라들면 강제 청산 */
+  return { lines, total, swan };
+}
+
+/* ====== 속보 정산 (1~2개) + 마진콜 + 파산 ====== */
+function settle(r, events, round) {
+  let lines = [], swans = [], total = 0;
+  for (const ev of events) { const e = applyEventEffects(r, ev); lines = lines.concat(e.lines); total += e.total; if (e.swan) swans.push(e.swan); }
   let margin = null;
   if ((r.loan || 0) > 0) {
     const liq = liquidSum(r);
     if (liq < r.loan * 1.2) {
-      const repay = Math.min(liq, r.loan);
-      const leftover = liq - repay;
+      const repay = Math.min(liq, r.loan), leftover = liq - repay;
       LIQUID.forEach((k) => { r[k] = 0; });
       r.checking = Math.max(0, leftover);
       r.loan = Math.max(0, r.loan - repay);
       margin = { sold: liq, repay, remainLoan: r.loan };
     }
   }
-  const bankrupt = netWorth(r) < 0;
-  r.bankrupt = bankrupt;
-  return { round, eventId: event.id, title: event.title, total, lines, swan, margin, bankrupt };
+  const bankrupt = netWorth(r) < 0; r.bankrupt = bankrupt;
+  return { round, eventIds: events.map((e) => e.id), titles: events.map((e) => e.title), total, lines, swans, margin, bankrupt };
 }
 
 /* ===================================================================== */
@@ -315,7 +336,6 @@ export default function App() {
   );
 }
 
-/* ====== 공용 UI ====== */
 function Centered({ children }) { return <div style={{ minHeight: "100vh", display: "grid", placeItems: "center", padding: 20 }}>{children}</div>; }
 function Btn({ children, onClick, color = C.gold, fill, small, disabled, full }) {
   return (
@@ -335,7 +355,6 @@ const SectionLabel = ({ children }) => <div style={{ fontFamily: "'Black Han San
 const Badge = ({ children, color = C.gold }) => <span style={{ border: `1px solid ${color}`, color, borderRadius: 20, padding: "2px 8px", fontSize: 11, fontWeight: 700 }}>{children}</span>;
 const Empty = ({ children }) => <div style={{ background: C.panel, border: `1px dashed ${C.line}`, borderRadius: 14, padding: 24, textAlign: "center", color: C.sub, marginTop: 8 }}>{children}</div>;
 
-/* ====== 모드 선택 ====== */
 function ModeSelect({ onPick }) {
   return (
     <Centered>
@@ -344,7 +363,7 @@ function ModeSelect({ onPick }) {
         <Title size={44}>머니 서바이벌 2</Title>
         <p style={{ color: C.gold, fontFamily: "'Black Han Sans'", marginTop: 2 }}>인생 대모험 · 28세부터 노후까지</p>
         <p style={{ color: C.sub, marginTop: 8, maxWidth: 360, marginInline: "auto", lineHeight: 1.6 }}>
-          직업을 뽑고, 월급을 굴리고, 금리·빚·블랙스완을 견디며 <b>파산 없이 노후까지 살아남아라!</b>
+          직업을 뽑고, 자산을 사고팔며, 금리·빚·블랙스완을 견디며 <b>파산 없이 노후까지 살아남아라!</b>
         </p>
         <div style={{ display: "grid", gap: 12, marginTop: 26, width: 300, marginInline: "auto" }}>
           <Btn fill onClick={() => onPick("solo")} full>🎮 혼자 연습 (내 인생 살아보기)</Btn>
@@ -364,8 +383,7 @@ function ModeSelect({ onPick }) {
 /* ====== 생활비 고지서 팝업 ====== */
 function BudgetModal({ data, onClose }) {
   if (!data) return null;
-  const { income: inc, age } = data;
-  const stage = stageForAge(age);
+  const { income: inc, age } = data, stage = stageForAge(age);
   const Row = ({ label, v, plus, strong }) => (v === 0 ? null : (
     <div style={{ display: "flex", justifyContent: "space-between", fontSize: strong ? 16 : 14, padding: strong ? "6px 0" : "3px 0", fontWeight: strong ? 900 : 500 }}>
       <span style={{ color: strong ? C.text : C.sub }}>{label}</span>
@@ -409,7 +427,7 @@ function BudgetModal({ data, onClose }) {
   );
 }
 
-/* ===================== 게임 (혼자/수업 공용) ===================== */
+/* ===================== 게임 ===================== */
 function PlayGame({ mode, onBack }) {
   const isClass = mode === "class";
   const [step, setStep] = useState("name");
@@ -417,10 +435,10 @@ function PlayGame({ mode, onBack }) {
   const [rec, setRec] = useState(null);
   const [round, setRound] = useState(1);
   const [rate, setRate] = useState(DEFAULT_RATE);
-  const [event, setEvent] = useState(null);
+  const [events, setEvents] = useState([]); // 현재 속보(1~2개)
   const [phase, setPhase] = useState("invest");
   const [finalList, setFinalList] = useState([]);
-  const [budget, setBudget] = useState(null); // 생활비 팝업
+  const [budget, setBudget] = useState(null);
   const idRef = useRef(uid());
   const recRef = useRef(null), roundRef = useRef(1), stepRef = useRef("name"), rateRef = useRef(DEFAULT_RATE);
   recRef.current = rec; roundRef.current = round; stepRef.current = step; rateRef.current = rate;
@@ -444,11 +462,12 @@ function PlayGame({ mode, onBack }) {
       const r = recRef.current;
       if (!r) return;
       if (r.bankrupt) { if (stepRef.current !== "dead") setStep("dead"); return; }
+      const ids = g.newsIds || (g.newsId ? [g.newsId] : null);
       if (g.phase === "invest" && (r.lastSalaryRound || 0) < g.round) {
         const nr = startRound(r, g.round, g.rate ?? DEFAULT_RATE);
-        setRec(nr); recRef.current = nr; setEvent(null); setStep("invest"); openBudget(nr); write(nr);
-      } else if (g.phase === "news" && g.newsId && stepRef.current !== "news") {
-        setEvent(eventById(g.newsId)); setStep("news");
+        setRec(nr); recRef.current = nr; setEvents([]); setStep("invest"); openBudget(nr); write(nr);
+      } else if (g.phase === "news" && ids && stepRef.current !== "news") {
+        setEvents(ids.map(eventById).filter(Boolean)); setStep("news");
       }
     };
     poll(); const iv = setInterval(poll, 1500);
@@ -456,50 +475,51 @@ function PlayGame({ mode, onBack }) {
   }, [isClass]);
 
   const startJob = (job) => {
-    const rnd = isClass ? roundRef.current : 1;
-    const rt = isClass ? rateRef.current : DEFAULT_RATE;
+    const rnd = isClass ? roundRef.current : 1, rt = isClass ? rateRef.current : DEFAULT_RATE;
     const base = { id: idRef.current, name, job: job.name, bitcoin: 0, stock: 0, bond: 0, savings: 0, pension: 0, realestate: 0,
       luxury: 0, parents: 0, loan: 0, insured: false, ready: false, lastResult: null, jobChanged: false, bankrupt: false, history: [] };
     const r = startRound(base, rnd, rt);
     r.history = [{ round: rnd, age: r.age, net: netWorth(r) }];
     setRec(r); recRef.current = r; setStep("invest"); openBudget(r);
-    if (isClass) write(r); // 혼자 연습은 공유 DB에 쓰지 않음
+    if (isClass) write(r);
   };
 
-  const confirmInvest = ({ alloc, newLoan, repay, insured }) => {
-    const available = rec.checking + newLoan - repay;
-    if (ALLOC.reduce((s, a) => s + (alloc[a.key] || 0), 0) !== available) return;
+  const confirmInvest = ({ targets, newLoan, repay, insured }) => {
+    const investCur = INVEST_KEYS.reduce((s, k) => s + (rec[k] || 0), 0);
+    const pool = rec.checking + newLoan - repay + investCur;
+    const used = INVEST_KEYS.reduce((s, k) => s + (targets[k] || 0), 0);
+    const residual = pool - used;
+    if (residual < 0) return;
+    if ((targets.pension || 0) < (rec.pension || 0)) return;
+    if ((targets.parents || 0) < (rec.parents || 0)) return;
     const r = { ...rec };
-    r.insured = insured;
+    INVEST_KEYS.forEach((k) => { r[k] = targets[k] || 0; });
+    r.checking = residual; r.insured = insured;
     r.loan = Math.max(0, (rec.loan || 0) + newLoan - repay);
-    ALLOC.forEach((a) => { if (a.key !== "checking") r[a.key] = (r[a.key] || 0) + (alloc[a.key] || 0); });
-    r.checking = alloc.checking || 0;
     if (isClass) { r.ready = true; setRec(r); recRef.current = r; setStep("waiting"); write(r); }
-    else { const ev = EVENTS[Math.floor(Math.random() * EVENTS.length)]; setRec(r); recRef.current = r; setEvent(ev); setStep("news"); }
+    else { setRec(r); recRef.current = r; setEvents([randEvent()]); setStep("news"); }
   };
 
   const reveal = () => {
     const r = { ...rec };
-    const res = applyNews(r, event, round); r.lastResult = res;
+    const res = settle(r, events, round); r.lastResult = res;
     r.history = [...(r.history || []), { round, age: ageForRound(round), net: netWorth(r) }];
-    if (event.rateDelta && !isClass) { const nrate = clamp(rate + event.rateDelta, 0, 0.15); setRate(nrate); rateRef.current = nrate; }
+    if (!isClass) { const d = evsRateDelta(events); if (d) { const nr = clamp(rate + d, 0, 0.15); setRate(nr); rateRef.current = nr; } }
     setRec(r); recRef.current = r; if (isClass) write(r);
   };
 
   const changeJob = (job) => {
     const r = { ...rec, job: job.name, jobChanged: true };
-    r.checking = Math.max(0, r.checking - (r.lastSalaryAmt || 0));
-    r.lastSalaryAmt = 0;
+    r.checking = Math.max(0, r.checking - (r.lastSalaryAmt || 0)); r.lastSalaryAmt = 0;
     if (r.income) r.income = { ...r.income, work: 0, net: r.income.net - (rec.lastSalaryAmt || 0) };
     setRec(r); recRef.current = r; setStep("invest"); if (isClass) write(r);
   };
 
   const nextYearSolo = () => {
     if (rec.bankrupt) { setStep("dead"); return; }
-    const nrnd = round + 1;
-    const r = startRound(rec, nrnd, rate);
+    const nrnd = round + 1, r = startRound(rec, nrnd, rate);
     setRound(nrnd); roundRef.current = nrnd;
-    setRec(r); recRef.current = r; setEvent(null); setStep("invest"); openBudget(r);
+    setRec(r); recRef.current = r; setEvents([]); setStep("invest"); openBudget(r);
   };
 
   if (step === "name") return <JoinScreen name={name} setName={setName} onJoin={() => setStep("job")} onBack={onBack} sub={isClass ? "수업 참여" : "혼자 연습"} />;
@@ -533,7 +553,7 @@ function PlayGame({ mode, onBack }) {
 
           {step === "news" && (
             <>
-              <NewsBanner event={event} />
+              <NewsList events={events} />
               {!revealed ? (
                 <div style={{ textAlign: "center", marginTop: 18 }}>
                   <p style={{ color: C.sub, marginBottom: 12 }}>내 투자와 인생은 어떻게 됐을까?</p>
@@ -556,7 +576,6 @@ function PlayGame({ mode, onBack }) {
   );
 }
 
-/* ====== 플레이어 헤더 (아바타) ====== */
 function PlayerHeader({ name, rec, isClass }) {
   const job = jobByName(rec.job), av = avatarOf(rec), st = stressOf(rec);
   return (
@@ -584,7 +603,6 @@ function PlayerHeader({ name, rec, isClass }) {
   );
 }
 
-/* ====== 거시경제 바 (금리·생애단계) ====== */
 function MacroBar({ rec, rate, stage }) {
   return (
     <div style={{ display: "flex", gap: 8 }}>
@@ -604,7 +622,6 @@ function MacroBar({ rec, rate, stage }) {
   );
 }
 
-/* ====== 순자산 그래프 (Recharts) ====== */
 function NetWorthChart({ history }) {
   const data = history.map((h) => ({ name: `${h.age}세`, net: Math.round(h.net * UNIT) }));
   const min = Math.min(0, ...data.map((d) => d.net));
@@ -696,25 +713,42 @@ function JobPick({ name, onPickJob, onBack, rejob }) {
   );
 }
 
+/* ====== 투자(사고팔기·리밸런싱) ====== */
 function InvestScreen({ rec, onSubmit, onChangeJob, onShowBudget }) {
-  const [a, setA] = useState(() => Object.fromEntries(ALLOC.map((x) => [x.key, 0])));
+  const [t, setT] = useState(() => Object.fromEntries(ALLOC.map((x) => [x.key, rec[x.key] || 0])));
   const [insured, setInsured] = useState(!!rec.insured);
   const [newLoan, setNewLoan] = useState(0);
   const [repay, setRepay] = useState(0);
 
-  const assets = assetsSum(rec);
-  const maxNewLoan = rec.age >= RETIRE_AGE ? 0 : Math.max(0, Math.round(assets * 1.5) - (rec.loan || 0));
+  const investCur = INVEST_KEYS.reduce((s, k) => s + (rec[k] || 0), 0);
+  const cashIn = rec.checking + newLoan - repay;
+  const pool = cashIn + investCur;
+  const used = INVEST_KEYS.reduce((s, k) => s + (t[k] || 0), 0);
+  const residual = pool - used; // 통장에 남는 현금
+  const maxNewLoan = rec.age >= RETIRE_AGE ? 0 : Math.max(0, Math.round(assetsSum(rec) * 1.5) - (rec.loan || 0));
   const maxRepay = Math.min(rec.checking, rec.loan || 0);
-  const available = rec.checking + newLoan - repay;
-  const used = ALLOC.reduce((s, x) => s + (a[x.key] || 0), 0);
-  const diff = available - used, matched = diff === 0;
-  const set = (k, v) => setA((p) => ({ ...p, [k]: Math.min(Math.max(0, available), Math.max(0, v)) }));
+  const floors = { pension: rec.pension || 0, parents: rec.parents || 0 };
+  const okFloors = (t.pension || 0) >= floors.pension && (t.parents || 0) >= floors.parents;
+  const valid = residual >= 0 && okFloors;
+  const setVal = (k, v) => { const fl = floors[k] || 0; setT((p) => ({ ...p, [k]: Math.max(fl, Math.min(Math.max(0, pool), Math.round(v))) })); };
 
   return (
     <div style={{ background: C.panel, border: `1px solid ${C.line}`, borderRadius: 16, padding: 16 }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-        <SectionLabel>🧾 이번 해 여윳돈 {fmt(rec.checking)}</SectionLabel>
+        <SectionLabel>💼 자산 사고팔기 (리밸런싱)</SectionLabel>
         <button onClick={onShowBudget} style={{ background: "transparent", border: `1px solid ${C.line}`, borderRadius: 8, padding: "4px 10px", color: C.sub, fontSize: 12, cursor: "pointer" }}>가계부 다시보기</button>
+      </div>
+      <p style={{ color: C.sub, fontSize: 11.5, margin: "4px 0 0" }}>슬라이더를 <b>올리면 사기 / 내리면 팔기</b>. 남는 돈은 자동으로 💳통장에 담겨요. (연금·부모님용돈은 못 팜)</p>
+
+      {/* 통장(현금) 잔액 */}
+      <div style={{ marginTop: 10, borderRadius: 12, padding: "10px 14px", border: `2px solid ${residual < 0 ? C.red : C.green}`, background: residual < 0 ? "#fdeceb" : "#e8f8f1", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+        <div>
+          <div style={{ fontSize: 11, color: C.sub }}>💳 남는 현금 (통장에 보관)</div>
+          <div style={{ fontFamily: "'Black Han Sans'", fontSize: 20, color: residual < 0 ? C.red : C.green }}>{fmt(Math.max(0, residual))}</div>
+        </div>
+        <div style={{ fontSize: 11.5, fontWeight: 700, color: residual < 0 ? C.red : C.sub, textAlign: "right" }}>
+          {residual < 0 ? `⚠️ ${fmt(-residual)} 초과! 줄여요` : `굴릴 수 있는 총액 ${fmt(pool)}`}
+        </div>
       </div>
 
       {/* 보험 */}
@@ -723,21 +757,20 @@ function InvestScreen({ rec, onSubmit, onChangeJob, onShowBudget }) {
         <span style={{ fontSize: 24 }}>{insured ? "🛡️" : "🩹"}</span>
         <div style={{ flex: 1 }}>
           <div style={{ fontWeight: 900, color: insured ? C.green : C.text }}>보험 {insured ? "가입 중" : "미가입"}</div>
-          <div style={{ fontSize: 11.5, color: C.sub }}>매 해 {fmt(INS_PREMIUM)} 내고, 블랙스완(큰 병·사고) 피해를 막아요</div>
+          <div style={{ fontSize: 11.5, color: C.sub }}>매 해 {fmt(INS_PREMIUM)} 내고, 블랙스완(큰 병·사고·화재)의 <b>약 90% 피해를 막아요</b></div>
         </div>
         <span style={{ fontSize: 13, fontWeight: 800, color: insured ? C.green : C.sub }}>{insured ? "ON ✓" : "OFF"}</span>
       </button>
 
-      {/* 레버리지 (빚) — 크게, 잘 보이게 */}
+      {/* 레버리지 */}
       {(maxNewLoan > 0 || (rec.loan || 0) > 0) && (
         <div style={{ marginTop: 12, background: "#fff4f2", border: `2px solid #e8837a`, borderRadius: 14, padding: 14 }}>
           <div style={{ fontFamily: "'Black Han Sans'", color: "#c0392b", fontSize: 16 }}>⚠️ 레버리지 — 빚내서 투자하기 (고급)</div>
-          <div style={{ fontSize: 11.5, color: "#a2554e", marginTop: 2 }}>빌린 돈으로 더 크게 투자! 대박도 크지만, 폭락하면 <b>강제청산(반대매매)</b> 당해요. 대출금리 {((rec.rate + LOAN_SPREAD) * 100).toFixed(1)}%</div>
+          <div style={{ fontSize: 11.5, color: "#a2554e", marginTop: 2 }}>빌린 돈으로 더 크게! 폭락하면 <b>강제청산(반대매매)</b>. 대출금리 {((rec.rate + LOAN_SPREAD) * 100).toFixed(1)}%</div>
           {maxNewLoan > 0 && (
             <div style={{ marginTop: 12 }}>
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
-                <b style={{ color: "#c0392b", fontSize: 14 }}>🔻 대출 받기</b>
-                <span style={{ color: C.gold, fontFamily: "'Black Han Sans'", fontSize: 18 }}>{fmt(newLoan)}</span>
+                <b style={{ color: "#c0392b", fontSize: 14 }}>🔻 대출 받기</b><span style={{ color: C.gold, fontFamily: "'Black Han Sans'", fontSize: 18 }}>{fmt(newLoan)}</span>
               </div>
               <input type="range" min={0} max={maxNewLoan} value={newLoan} onChange={(e) => { setNewLoan(+e.target.value); setRepay(0); }} style={{ width: "100%", height: 22, accentColor: "#c0392b" }} />
               <div style={{ display: "flex", justifyContent: "space-between", fontSize: 10.5, color: C.sub }}><span>0</span><span>최대 {fmt(maxNewLoan)}</span></div>
@@ -746,52 +779,47 @@ function InvestScreen({ rec, onSubmit, onChangeJob, onShowBudget }) {
           {(rec.loan || 0) > 0 && (
             <div style={{ marginTop: 12 }}>
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
-                <b style={{ color: C.green, fontSize: 14 }}>🔺 빚 갚기 (현재 빚 {fmt(rec.loan)})</b>
-                <span style={{ color: C.gold, fontFamily: "'Black Han Sans'", fontSize: 18 }}>{fmt(repay)}</span>
+                <b style={{ color: C.green, fontSize: 14 }}>🔺 빚 갚기 (현재 빚 {fmt(rec.loan)})</b><span style={{ color: C.gold, fontFamily: "'Black Han Sans'", fontSize: 18 }}>{fmt(repay)}</span>
               </div>
               <input type="range" min={0} max={maxRepay} value={repay} onChange={(e) => { setRepay(+e.target.value); setNewLoan(0); }} style={{ width: "100%", height: 22, accentColor: C.green }} />
-              <div style={{ fontSize: 10.5, color: C.sub }}>통장 돈으로 빚을 갚으면 이자 부담이 줄어요.</div>
+              <div style={{ fontSize: 10.5, color: C.sub }}>통장(남는 현금)으로 빚을 갚아 이자 부담을 줄여요.</div>
             </div>
           )}
         </div>
       )}
 
-      {/* 배분 */}
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginTop: 14 }}>
-        <SectionLabel>💸 돈을 전부 배분하세요</SectionLabel>
-        <span style={{ fontSize: 12, color: C.sub }}>배분할 총액 <b style={{ color: C.gold }}>{fmt(available)}</b></span>
-      </div>
-      <div style={{ textAlign: "center", padding: "10px 12px", borderRadius: 12, margin: "8px 0 12px", fontWeight: 700,
-        border: `2px solid ${matched ? C.green : C.red}`, background: matched ? "#e8f8f1" : "#fdeceb",
-        color: matched ? C.green : C.red, animation: diff < 0 ? "shake .35s" : "none" }}>
-        {available < 0 && "⚠️ 갚을 돈이 통장보다 많아요. 줄여주세요"}
-        {available >= 0 && diff < 0 && `⚠️ ${fmt(-diff)} 초과했습니다! 줄여주세요`}
-        {available >= 0 && diff > 0 && `🔸 아직 ${fmt(diff)} 남았습니다 (전부 배분해야 진행돼요)`}
-        {available >= 0 && matched && "✅ 딱 맞췄습니다! 진행할 수 있어요"}
-      </div>
-      <div className="allocGrid">
-        {ALLOC.map((item) => (
-          <div key={item.key} style={{ background: C.panel2, borderRadius: 12, padding: 10 }}>
-            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-              <span style={{ fontSize: 20 }}>{item.emoji}</span>
-              <div style={{ flex: 1, minWidth: 0 }}>
-                <div style={{ fontWeight: 900, color: item.color }}>{item.name}</div>
-                <div style={{ fontSize: 10.5, color: C.sub }}>{item.hint}</div>
+      {/* 자산 슬라이더 */}
+      <div className="allocGrid" style={{ marginTop: 14 }}>
+        {ALLOC.map((item) => {
+          const cur = rec[item.key] || 0, val = t[item.key] || 0, delta = val - cur;
+          const fl = floors[item.key] || 0;
+          return (
+            <div key={item.key} style={{ background: C.panel2, borderRadius: 12, padding: 10 }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                <span style={{ fontSize: 20 }}>{item.emoji}</span>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ fontWeight: 900, color: item.color }}>{item.name} {!item.sell && <span style={{ fontSize: 10, color: C.sub }}>🔒못팜</span>}</div>
+                  <div style={{ fontSize: 10.5, color: C.sub }}>{item.hint}</div>
+                </div>
+                <div style={{ textAlign: "right", minWidth: 82 }}>
+                  <div style={{ fontFamily: "'Black Han Sans'", color: C.gold }}>{fmt(val)}</div>
+                  {delta !== 0 && <div style={{ fontSize: 10.5, fontWeight: 800, color: delta > 0 ? C.blue : C.red }}>{delta > 0 ? "사기 +" : "팔기 -"}{fmt(Math.abs(delta))}</div>}
+                </div>
               </div>
-              <div style={{ fontFamily: "'Black Han Sans'", color: C.gold, minWidth: 74, textAlign: "right" }}>{fmt(a[item.key])}</div>
+              <div style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 8 }}>
+                <Stepper onClick={() => setVal(item.key, val - 5)}>-5</Stepper>
+                <Stepper onClick={() => setVal(item.key, val - 1)}>-1</Stepper>
+                <input type="range" min={fl} max={Math.max(fl, pool)} value={val} onChange={(e) => setVal(item.key, +e.target.value)} style={{ flex: 1, accentColor: item.color }} />
+                <Stepper onClick={() => setVal(item.key, val + 1)}>+1</Stepper>
+                <Stepper onClick={() => setVal(item.key, val + 5)}>+5</Stepper>
+              </div>
             </div>
-            <div style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 8 }}>
-              <Stepper onClick={() => set(item.key, a[item.key] - 5)}>-5</Stepper>
-              <Stepper onClick={() => set(item.key, a[item.key] - 1)}>-1</Stepper>
-              <input type="range" min={0} max={Math.max(0, available)} value={a[item.key]} onChange={(e) => set(item.key, +e.target.value)} style={{ flex: 1, accentColor: item.color }} />
-              <Stepper onClick={() => set(item.key, a[item.key] + 1)}>+1</Stepper>
-              <Stepper onClick={() => set(item.key, a[item.key] + 5)}>+5</Stepper>
-            </div>
-          </div>
-        ))}
+          );
+        })}
       </div>
+
       <div style={{ marginTop: 14 }}>
-        <Btn fill full disabled={!matched} onClick={() => onSubmit({ alloc: a, newLoan, repay, insured })}>{matched ? "투자 확정 →" : "금액을 딱 맞춰주세요"}</Btn>
+        <Btn fill full disabled={!valid} onClick={() => onSubmit({ targets: t, newLoan, repay, insured })}>{valid ? "이대로 확정 →" : "금액이 초과됐어요 (줄여요)"}</Btn>
       </div>
       {onChangeJob && !rec.jobChanged && rec.age < RETIRE_AGE && (
         <div style={{ marginTop: 10, textAlign: "center" }}>
@@ -799,7 +827,7 @@ function InvestScreen({ rec, onSubmit, onChangeJob, onShowBudget }) {
         </div>
       )}
       {rec.jobChanged && <p style={{ color: C.sub, fontSize: 11, textAlign: "center", marginTop: 8 }}>이직 기회는 모두 사용했어요.</p>}
-      <p style={{ color: C.sub, fontSize: 11, textAlign: "center", marginTop: 8 }}>단위: 1칸 = 10만원 · 남길 돈은 💳입출금통장에</p>
+      <p style={{ color: C.sub, fontSize: 11, textAlign: "center", marginTop: 8 }}>단위: 1칸 = 10만원 · 안 판 자산은 그대로 유지돼요</p>
     </div>
   );
 }
@@ -811,32 +839,32 @@ function ResultBreakdown({ result, rec, onNext, onDead }) {
       <div style={{ background: C.panel, border: `1px solid ${C.line}`, borderRadius: 16, padding: 16, marginTop: 12 }}>
         <SectionLabel>📑 나의 결과</SectionLabel>
         <div style={{ display: "grid", gap: 6, marginTop: 8 }}>
-          {result.lines.length === 0 && !result.swan && <div style={{ color: C.sub }}>이번엔 시장 등락 영향은 없었어요.</div>}
+          {result.lines.length === 0 && result.swans.length === 0 && <div style={{ color: C.sub }}>이번엔 시장 등락 영향은 없었어요.</div>}
           {result.lines.map((l, i) => (
             <div key={i} style={{ display: "flex", alignItems: "center", gap: 8, background: C.panel2, borderRadius: 10, padding: "8px 10px" }}>
-              <span style={{ flex: 1, fontWeight: 700 }}>{l.isParents ? "🎁 부모님 보답" : assetName(l.key)}
-                {!l.isParents && <span style={{ color: C.sub, fontSize: 11, marginLeft: 6 }}>{(l.rate * 100).toFixed(1)}%</span>}</span>
-              {!l.isParents && <span style={{ color: C.sub, fontSize: 12 }}>{fmt(l.before)} →</span>}
+              <span style={{ flex: 1, fontWeight: 700 }}>{l.isParents ? "🎁 부모님 보답" : l.isBonus ? "🧓 연금 보너스" : assetName(l.key)}
+                {!l.isParents && !l.isBonus && <span style={{ color: C.sub, fontSize: 11, marginLeft: 6 }}>{(l.rate * 100).toFixed(1)}%</span>}</span>
+              {!l.isParents && !l.isBonus && <span style={{ color: C.sub, fontSize: 12 }}>{fmt(l.before)} →</span>}
               <span style={{ fontWeight: 900, color: l.diff >= 0 ? C.green : C.red, minWidth: 90, textAlign: "right" }}>{l.diff >= 0 ? "+" : "-"}{fmt(Math.abs(l.diff))}</span>
             </div>
           ))}
         </div>
-        {result.swan && (
-          <div style={{ marginTop: 10, borderRadius: 12, padding: 12, border: `2px solid ${result.swan.insured ? C.green : C.red}`, background: result.swan.insured ? "#e8f8f1" : "#fdeceb" }}>
-            <div style={{ fontWeight: 900, color: result.swan.insured ? C.green : C.red }}>
-              {result.swan.insured ? "🛡️ 보험이 지켜줬어요!" : "💥 블랙스완 직격!"} — {result.swan.label}
+        {result.swans.map((swan, i) => (
+          <div key={i} style={{ marginTop: 10, borderRadius: 12, padding: 12, border: `2px solid ${swan.insured ? C.green : C.red}`, background: swan.insured ? "#e8f8f1" : "#fdeceb" }}>
+            <div style={{ fontWeight: 900, color: swan.insured ? C.green : C.red }}>
+              {swan.insured ? "🛡️ 보험이 지켜줬어요!" : "💥 블랙스완 직격!"} — {swan.label}
             </div>
             <div style={{ fontSize: 12, color: C.sub, marginTop: 4 }}>
-              총 피해 {fmt(result.swan.raw)} 중 {result.swan.insured ? <>보험이 <b style={{ color: C.green }}>{fmt(result.swan.covered)}</b> 보장 → 실제 </> : "보험 없어서 "}
-              <b style={{ color: C.red }}>-{fmt(result.swan.damage)}</b>
+              총 피해 {fmt(swan.raw)} 중 {swan.insured ? <>보험이 <b style={{ color: C.green }}>{fmt(swan.covered)}</b> 보장 → 실제 </> : "보험 없어서 "}
+              <b style={{ color: C.red }}>-{fmt(swan.damage)}</b>
             </div>
-            {result.swan.toLoan > 0 && (
+            {swan.toLoan > 0 && (
               <div style={{ fontSize: 12, color: C.red, marginTop: 4, fontWeight: 700 }}>
-                💸 당장 현금화할 자산이 부족해 <b>{fmt(result.swan.toLoan)}</b>를 빚으로 냈어요! (부동산·연금은 급할 때 못 씀 → 유동성의 중요성)
+                💸 당장 현금화할 자산이 부족해 <b>{fmt(swan.toLoan)}</b>를 빚으로! (부동산·연금은 급할 때 못 씀 → 유동성 중요)
               </div>
             )}
           </div>
-        )}
+        ))}
         {result.margin && (
           <div style={{ marginTop: 10, borderRadius: 12, padding: 12, border: `2px solid ${C.red}`, background: "#fdeceb", animation: "pulseRed 1.4s infinite" }}>
             <div style={{ fontWeight: 900, color: C.red }}>🚨 반대매매(강제청산) 발생!</div>
@@ -884,7 +912,6 @@ function Portfolio({ rec }) {
   );
 }
 
-/* ====== 파산 화면 ====== */
 function BankruptScreen({ rec, isClass, onBack }) {
   const [quiz, setQuiz] = useState(false);
   if (quiz) return <QuizScreen onBack={() => setQuiz(false)} />;
@@ -893,16 +920,12 @@ function BankruptScreen({ rec, isClass, onBack }) {
       <div style={{ textAlign: "center", maxWidth: 400, animation: "pop .4s" }}>
         <div style={{ fontSize: 64 }}>💀</div>
         <Title size={34}>파산…</Title>
-        <p style={{ color: C.sub, marginTop: 10, lineHeight: 1.6 }}>
-          {rec.name}님은 <b>{rec.age}세</b>에 순자산이 마이너스가 되어 게임에서 탈락했어요.
-        </p>
+        <p style={{ color: C.sub, marginTop: 10, lineHeight: 1.6 }}>{rec.name}님은 <b>{rec.age}세</b>에 순자산이 마이너스가 되어 게임에서 탈락했어요.</p>
         <div style={{ background: C.panel, border: `2px solid ${C.red}`, borderRadius: 14, padding: 14, marginTop: 12 }}>
           <div style={{ color: C.red, fontFamily: "'Black Han Sans'", fontSize: 22 }}>{fmt(netWorth(rec))}</div>
           <div style={{ fontSize: 12, color: C.sub, marginTop: 4 }}>빚 {fmt(rec.loan || 0)}</div>
         </div>
-        <p style={{ color: C.gold, fontWeight: 800, marginTop: 14, lineHeight: 1.6 }}>
-          "빚투·몰빵은 위험해. 분산투자 + 보험 + 꾸준한 저축이 진짜 생존법!"
-        </p>
+        <p style={{ color: C.gold, fontWeight: 800, marginTop: 14, lineHeight: 1.6 }}>"빚투·몰빵은 위험해. 분산투자 + 보험 + 꾸준한 저축이 진짜 생존법!"</p>
         <div style={{ display: "flex", gap: 10, justifyContent: "center", marginTop: 18, flexWrap: "wrap" }}>
           <Btn fill onClick={() => setQuiz(true)}>📝 정리 문제 풀기</Btn>
           <Btn color={C.sub} onClick={onBack}>처음으로</Btn>
@@ -912,7 +935,6 @@ function BankruptScreen({ rec, isClass, onBack }) {
   );
 }
 
-/* ====== 최종 순위 / 시상대 ====== */
 function FinalRanking({ list, meId, onBack }) {
   const [quiz, setQuiz] = useState(false);
   if (quiz) return <QuizScreen onBack={() => setQuiz(false)} />;
@@ -937,8 +959,7 @@ function FinalRanking({ list, meId, onBack }) {
       )}
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8, alignItems: "end", marginTop: 8 }}>
         {[1, 0, 2].map((idx) => {
-          const p = top3[idx];
-          if (!p) return <div key={idx} />;
+          const p = top3[idx]; if (!p) return <div key={idx} />;
           const job = jobByName(p.job), isMe = p.id === meId;
           return (
             <div key={p.id} style={{ textAlign: "center" }}>
@@ -946,9 +967,7 @@ function FinalRanking({ list, meId, onBack }) {
               <div style={{ fontSize: 22 }}>{job?.emoji}</div>
               <div style={{ fontWeight: 900, fontSize: 13, color: isMe ? C.gold : C.text }}>{p.name}{isMe ? " (나)" : ""}</div>
               <div style={{ fontFamily: "'Black Han Sans'", fontSize: 12, color: C.gold }}>{fmt(netWorth(p))}</div>
-              <div style={{ height: pHeight[idx], marginTop: 6, borderRadius: "10px 10px 0 0",
-                background: `linear-gradient(180deg,${pColor[idx]},${pColor[idx]}33)`, border: `1px solid ${pColor[idx]}`,
-                display: "grid", placeItems: "start center", paddingTop: 6, fontFamily: "'Black Han Sans'", color: C.ink, fontSize: 18 }}>{idx + 1}</div>
+              <div style={{ height: pHeight[idx], marginTop: 6, borderRadius: "10px 10px 0 0", background: `linear-gradient(180deg,${pColor[idx]},${pColor[idx]}33)`, border: `1px solid ${pColor[idx]}`, display: "grid", placeItems: "start center", paddingTop: 6, fontFamily: "'Black Han Sans'", color: C.ink, fontSize: 18 }}>{idx + 1}</div>
             </div>
           );
         })}
@@ -980,7 +999,6 @@ function FinalRanking({ list, meId, onBack }) {
   );
 }
 
-/* ====== 정리 문제 (퀴즈) ====== */
 function QuizScreen({ onBack }) {
   const [picked, setPicked] = useState({});
   const [submitted, setSubmitted] = useState(false);
@@ -1003,10 +1021,8 @@ function QuizScreen({ onBack }) {
                 {q.options.map((op) => {
                   const chosen = picked[i] === op;
                   let bg = C.panel2, bd = C.line, col = C.text;
-                  if (submitted) {
-                    if (op === q.answer) { bg = "#e8f8f1"; bd = C.green; col = C.green; }
-                    else if (chosen) { bg = "#fdeceb"; bd = C.red; col = C.red; }
-                  } else if (chosen) { bg = "#fff7e6"; bd = C.gold; col = C.gold; }
+                  if (submitted) { if (op === q.answer) { bg = "#e8f8f1"; bd = C.green; col = C.green; } else if (chosen) { bg = "#fdeceb"; bd = C.red; col = C.red; } }
+                  else if (chosen) { bg = "#fff7e6"; bd = C.gold; col = C.gold; }
                   return (
                     <button key={op} disabled={submitted} onClick={() => setPicked((p) => ({ ...p, [i]: op }))}
                       style={{ cursor: submitted ? "default" : "pointer", background: bg, border: `2px solid ${bd}`, color: col, borderRadius: 10, padding: "10px 8px", fontWeight: 800, fontSize: 14 }}>
@@ -1015,11 +1031,7 @@ function QuizScreen({ onBack }) {
                   );
                 })}
               </div>
-              {submitted && (
-                <div style={{ marginTop: 8, fontSize: 13, fontWeight: 700, color: correct ? C.green : C.red }}>
-                  {correct ? "정답! 🎉" : `아쉬워요. 정답은 "${q.answer}"`}
-                </div>
-              )}
+              {submitted && <div style={{ marginTop: 8, fontSize: 13, fontWeight: 700, color: correct ? C.green : C.red }}>{correct ? "정답! 🎉" : `아쉬워요. 정답은 "${q.answer}"`}</div>}
             </div>
           );
         })}
@@ -1041,12 +1053,20 @@ function QuizScreen({ onBack }) {
   );
 }
 
-/* ====== 리치 속보 배너 ====== */
+/* ====== 속보 배너 ====== */
+function NewsList({ events }) {
+  return (
+    <div style={{ display: "grid", gap: 10 }}>
+      {events.length > 1 && <div style={{ fontFamily: "'Black Han Sans'", color: C.red, fontSize: 14 }}>📰 속보 {events.length}건 동시 발생!</div>}
+      {events.map((ev, i) => <NewsBanner key={i} event={ev} />)}
+    </div>
+  );
+}
 function NewsBanner({ event }) {
   const cc = CAT[event.cat] || C.gold;
   const now = new Date();
   const hh = String(now.getHours()).padStart(2, "0"), mm = String(now.getMinutes()).padStart(2, "0");
-  const tick = ` 📢 속보  ·  ${event.ticker}  ·  ${event.title}  · `;
+  const tick = ` 📢 속보  ·  ${event.ticker || event.title}  ·  ${event.title}  · `;
   return (
     <div style={{ borderRadius: 14, overflow: "hidden", border: `2px solid #ef4444`, animation: "slideDown .4s", boxShadow: "0 10px 30px #0008" }}>
       <div style={{ background: "linear-gradient(90deg,#b91c1c,#ef4444)", color: "#fff", padding: "7px 12px", display: "flex", alignItems: "center", gap: 8 }}>
@@ -1055,9 +1075,7 @@ function NewsBanner({ event }) {
         <span style={{ marginLeft: "auto", fontSize: 12, opacity: 0.9 }}>속보 · {hh}:{mm}</span>
       </div>
       <div style={{ background: "linear-gradient(160deg,#1a1014,#15171f)", padding: 16 }}>
-        <span style={{ display: "inline-block", background: `${cc}22`, color: cc, border: `1px solid ${cc}`, borderRadius: 6, fontSize: 11, fontWeight: 800, padding: "2px 8px", marginBottom: 10 }}>
-          {event.icon} {event.cat}
-        </span>
+        <span style={{ display: "inline-block", background: `${cc}22`, color: cc, border: `1px solid ${cc}`, borderRadius: 6, fontSize: 11, fontWeight: 800, padding: "2px 8px", marginBottom: 10 }}>{event.icon} {event.cat}</span>
         <div style={{ fontFamily: "'Black Han Sans'", fontSize: 21, lineHeight: 1.3, color: "#fff" }}>{event.title}</div>
         <p style={{ color: "#c9ced8", marginTop: 8, fontSize: 14, lineHeight: 1.55 }}>{event.body}</p>
       </div>
@@ -1095,11 +1113,27 @@ function AdminGate({ onBack }) {
   );
 }
 
+/* ====== 엑셀 저장 ====== */
+function exportExcel(players) {
+  const rows = [...players].sort((a, b) => netWorth(b) - netWorth(a)).map((p, i) => ({
+    순위: i + 1, 이름: p.name, 직업: p.job, 나이: p.age || ageForRound(p.round || 1),
+    "순자산(만원)": netWorth(p) * UNIT, "비트코인": (p.bitcoin || 0) * UNIT, "주식": (p.stock || 0) * UNIT,
+    "채권": (p.bond || 0) * UNIT, "적금": (p.savings || 0) * UNIT, "연금": (p.pension || 0) * UNIT,
+    "부동산": (p.realestate || 0) * UNIT, "명품": (p.luxury || 0) * UNIT, "통장": (p.checking || 0) * UNIT,
+    "빚(대출)": (p.loan || 0) * UNIT, "누적효도": (p.parents || 0) * UNIT, "보험": p.insured ? "O" : "X", "파산": p.bankrupt ? "O" : "X",
+  }));
+  const ws = XLSX.utils.json_to_sheet(rows);
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, "머니서바이벌 결과");
+  XLSX.writeFile(wb, `머니서바이벌_결과_${new Date().toISOString().slice(0, 10)}.xlsx`);
+}
+
 /* ===================== 다연쌤 ===================== */
 function AdminView({ onBack }) {
   const [players, setPlayers] = useState([]);
   const [game, setGame] = useState(null);
   const [pickNews, setPickNews] = useState(false);
+  const [sel, setSel] = useState([]); // 선택한 속보 id (최대 2)
 
   useEffect(() => {
     let active = true;
@@ -1120,17 +1154,20 @@ function AdminView({ onBack }) {
   const classPlayers = players.filter((p) => (p.round || 1) === round && !p.bankrupt);
   const readyCount = classPlayers.filter((p) => p.ready).length;
   const alive = players.filter((p) => !p.bankrupt).length;
+  const newsIds = game?.newsIds || (game?.newsId ? [game.newsId] : []);
 
-  const start = () => sSet(GKEY, { round: 1, phase: "invest", newsId: null, rate: DEFAULT_RATE });
-  const release = (id) => {
-    const ev = id ? eventById(id) : EVENTS[Math.floor(Math.random() * EVENTS.length)];
-    const nrate = clamp(rate + (ev.rateDelta || 0), 0, 0.15);
-    sSet(GKEY, { ...(game || { round: 1 }), phase: "news", newsId: ev.id, rate: nrate });
+  const start = () => sSet(GKEY, { round: 1, phase: "invest", newsIds: null, rate: DEFAULT_RATE });
+  const release = (ids) => {
+    const arr = ids && ids.length ? ids : [randEvent().id];
+    const evs = arr.map(eventById).filter(Boolean);
+    const nrate = clamp(rate + evsRateDelta(evs), 0, 0.15);
+    sSet(GKEY, { ...(game || { round: 1 }), phase: "news", newsIds: arr, newsId: null, rate: nrate });
   };
-  const next = () => sSet(GKEY, { round: round + 1, phase: "invest", newsId: null, rate });
+  const next = () => sSet(GKEY, { round: round + 1, phase: "invest", newsIds: null, rate });
   const setRateManual = (d) => sSet(GKEY, { ...(game || { round: 1, phase: "invest" }), rate: clamp(rate + d, 0, 0.15) });
   const endGame = () => sSet(GKEY, { ...(game || { round: 1 }), phase: "end" });
   const reset = async () => { const keys = await sList("mg:p:"); await Promise.all(keys.map(sDel)); await sDel(GKEY); setPlayers([]); setGame(null); };
+  const toggleSel = (id) => setSel((s) => s.includes(id) ? s.filter((x) => x !== id) : s.length >= 2 ? s : [...s, id]);
 
   if (!firebaseReady) {
     return (
@@ -1139,10 +1176,7 @@ function AdminView({ onBack }) {
           <span style={{ cursor: "pointer", color: C.sub }} onClick={onBack}>←</span>
           <Title size={24}>🖥️ 다연쌤</Title>
         </div>
-        <Empty>
-          실시간 교실 모드는 <b>Firebase 연결</b>이 필요해요.<br />
-          (연결 전에도 학생들은 ‘혼자 연습’으로 전체 기능을 즐길 수 있어요.)
-        </Empty>
+        <Empty>실시간 교실 모드는 <b>Firebase 연결</b>이 필요해요.<br />(연결 전에도 학생들은 ‘혼자 연습’으로 전체 기능을 즐길 수 있어요.)</Empty>
       </div>
     );
   }
@@ -1159,7 +1193,10 @@ function AdminView({ onBack }) {
           <Badge color={rate >= 0.06 ? C.red : C.gold}>기준금리 {(rate * 100).toFixed(1)}%</Badge>
           <Badge color={phase === "news" ? C.red : phase === "end" ? C.gold : C.green}>{phase === "news" ? "속보 발생" : phase === "end" ? "게임 종료" : "투자 시간"}</Badge>
         </div>
-        <Btn small color={C.sub} onClick={() => { if (confirm("전체 초기화할까요? 모든 참가자 데이터가 삭제됩니다.")) reset(); }}>전체 초기화</Btn>
+        <div style={{ display: "flex", gap: 8 }}>
+          {players.length > 0 && <Btn small color={C.green} onClick={() => exportExcel(players)}>📥 엑셀 다운로드</Btn>}
+          <Btn small color={C.sub} onClick={() => { if (confirm("전체 초기화할까요? 모든 참가자 데이터가 삭제됩니다.")) reset(); }}>전체 초기화</Btn>
+        </div>
       </div>
 
       <div style={{ background: C.panel, border: `1px solid ${C.line}`, borderRadius: 16, padding: 14, marginTop: 14, display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
@@ -1173,11 +1210,11 @@ function AdminView({ onBack }) {
         ) : phase === "invest" ? (
           <>
             <div style={{ animation: readyCount === classPlayers.length && classPlayers.length ? "pulseRed 1.4s infinite" : "none", borderRadius: 12 }}>
-              <Btn fill color={C.red} onClick={() => setPickNews(true)}>📰 속보 띄우기 (전원 동시)</Btn>
+              <Btn fill color={C.red} onClick={() => { setSel([]); setPickNews(true); }}>📰 속보 띄우기 (최대 2개)</Btn>
             </div>
             <span style={{ color: C.sub, fontSize: 14 }}>투자 완료 <b style={{ color: C.gold }}>{readyCount}</b> / {classPlayers.length}명</span>
             {classPlayers.length > 0 && readyCount === classPlayers.length && <Badge color={C.green}>전원 완료!</Badge>}
-            <span style={{ borderLeft: `1px solid ${C.line}`, paddingLeft: 10, color: C.sub, fontSize: 13 }}>금리 직접 조절:</span>
+            <span style={{ borderLeft: `1px solid ${C.line}`, paddingLeft: 10, color: C.sub, fontSize: 13 }}>금리 조절:</span>
             <Btn small color={C.blue} onClick={() => setRateManual(-0.01)}>▼ 인하</Btn>
             <Btn small color={C.red} onClick={() => setRateManual(0.01)}>▲ 인상</Btn>
           </>
@@ -1189,63 +1226,90 @@ function AdminView({ onBack }) {
         )}
       </div>
 
-      {phase === "news" && game?.newsId && <div style={{ marginTop: 14 }}><NewsBanner event={eventById(game.newsId)} /></div>}
+      {phase === "news" && newsIds.length > 0 && (
+        <div style={{ marginTop: 14, display: "grid", gap: 10 }}>
+          {newsIds.length > 1 && <div style={{ fontFamily: "'Black Han Sans'", color: C.red }}>📰 속보 {newsIds.length}건 동시!</div>}
+          {newsIds.map((id) => { const e = eventById(id); return e ? <NewsBanner key={id} event={e} /> : null; })}
+        </div>
+      )}
 
       {phase === "end" ? (
         <FinalRanking list={players} meId={null} onBack={onBack} />
       ) : (
-      <div style={{ marginTop: 16 }}>
-        <SectionLabel>📊 실시간 순위 (순자산 = 자산 - 빚)</SectionLabel>
-        {players.length === 0 ? <Empty>아직 참가자가 없어요. 학생들에게 '수업 참여'로 입장하라고 안내하세요.</Empty> : (
-          <div style={{ display: "grid", gap: 8, marginTop: 8 }}>
-            {players.map((p, i) => {
-              const net = netWorth(p), job = jobByName(p.job);
-              const isReady = p.ready && (p.round || 1) === round && phase === "invest";
-              const av = avatarOf(p);
-              return (
-                <div key={p.id} style={{ background: C.panel, border: `1px solid ${p.bankrupt ? C.red : isReady ? C.green : C.line}`, borderRadius: 12, padding: 12, opacity: p.bankrupt ? 0.7 : 1 }}>
-                  <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-                    <span style={{ fontFamily: "'Black Han Sans'", width: 28, color: i === 0 ? C.gold : C.sub, fontSize: 18 }}>{i === 0 ? "👑" : i + 1}</span>
-                    <span style={{ fontSize: 22 }}>{p.bankrupt ? "💀" : av.face}</span>
-                    <span style={{ fontSize: 18 }}>{job?.emoji}</span>
-                    <div style={{ flex: 1, minWidth: 0 }}>
-                      <div style={{ fontWeight: 900 }}>{p.name} <span style={{ color: C.sub, fontSize: 12, fontWeight: 500 }}>{p.job} · {p.age || ageForRound(p.round || 1)}세</span>
-                        {p.bankrupt && <span style={{ marginLeft: 6 }}><Badge color={C.red}>파산</Badge></span>}
-                        {isReady && <span style={{ marginLeft: 6 }}><Badge color={C.green}>완료</Badge></span>}
-                        {p.insured && <span style={{ marginLeft: 4 }}>🛡️</span>}
-                        {(p.loan || 0) > 0 && <span style={{ marginLeft: 4, color: C.red, fontSize: 11 }}>빚 {fmt(p.loan)}</span>}</div>
-                      <div style={{ height: 6, background: "#eceaf3", borderRadius: 6, marginTop: 6, overflow: "hidden" }}>
-                        <div style={{ height: "100%", width: `${(Math.abs(net) / maxNet) * 100}%`, background: net < 0 ? C.red : `linear-gradient(90deg,${C.goldDim},${C.gold})`, borderRadius: 6 }} />
+        <div style={{ marginTop: 16 }}>
+          <SectionLabel>📊 실시간 순위 (순자산 = 자산 - 빚)</SectionLabel>
+          {players.length === 0 ? <Empty>아직 참가자가 없어요. 학생들에게 '수업 참여'로 입장하라고 안내하세요.</Empty> : (
+            <div style={{ display: "grid", gap: 8, marginTop: 8 }}>
+              {players.map((p, i) => {
+                const net = netWorth(p), job = jobByName(p.job);
+                const isReady = p.ready && (p.round || 1) === round && phase === "invest";
+                const av = avatarOf(p);
+                return (
+                  <div key={p.id} style={{ background: C.panel, border: `1px solid ${p.bankrupt ? C.red : isReady ? C.green : C.line}`, borderRadius: 12, padding: 12, opacity: p.bankrupt ? 0.7 : 1 }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                      <span style={{ fontFamily: "'Black Han Sans'", width: 28, color: i === 0 ? C.gold : C.sub, fontSize: 18 }}>{i === 0 ? "👑" : i + 1}</span>
+                      <span style={{ fontSize: 22 }}>{p.bankrupt ? "💀" : av.face}</span>
+                      <span style={{ fontSize: 18 }}>{job?.emoji}</span>
+                      <div style={{ flex: 1, minWidth: 0 }}>
+                        <div style={{ fontWeight: 900 }}>{p.name} <span style={{ color: C.sub, fontSize: 12, fontWeight: 500 }}>{p.job} · {p.age || ageForRound(p.round || 1)}세</span>
+                          {p.bankrupt && <span style={{ marginLeft: 6 }}><Badge color={C.red}>파산</Badge></span>}
+                          {isReady && <span style={{ marginLeft: 6 }}><Badge color={C.green}>완료</Badge></span>}
+                          {p.insured && <span style={{ marginLeft: 4 }}>🛡️</span>}
+                          {(p.loan || 0) > 0 && <span style={{ marginLeft: 4, color: C.red, fontSize: 11 }}>빚 {fmt(p.loan)}</span>}</div>
+                        <div style={{ height: 6, background: "#eceaf3", borderRadius: 6, marginTop: 6, overflow: "hidden" }}>
+                          <div style={{ height: "100%", width: `${(Math.abs(net) / maxNet) * 100}%`, background: net < 0 ? C.red : `linear-gradient(90deg,${C.goldDim},${C.gold})`, borderRadius: 6 }} />
+                        </div>
+                      </div>
+                      <div style={{ textAlign: "right" }}>
+                        <div style={{ fontFamily: "'Black Han Sans'", color: net < 0 ? C.red : C.gold, fontSize: 16 }}>{fmt(net)}</div>
+                        {p.lastResult && <div style={{ fontSize: 12, color: p.lastResult.total >= 0 ? C.green : C.red }}>{p.lastResult.total >= 0 ? "▲" : "▼"} {fmt(Math.abs(p.lastResult.total))}</div>}
                       </div>
                     </div>
-                    <div style={{ textAlign: "right" }}>
-                      <div style={{ fontFamily: "'Black Han Sans'", color: net < 0 ? C.red : C.gold, fontSize: 16 }}>{fmt(net)}</div>
-                      {p.lastResult && <div style={{ fontSize: 12, color: p.lastResult.total >= 0 ? C.green : C.red }}>{p.lastResult.total >= 0 ? "▲" : "▼"} {fmt(Math.abs(p.lastResult.total))}</div>}
+                    <div style={{ display: "flex", height: 8, borderRadius: 6, overflow: "hidden", marginTop: 10, background: "#eceaf3" }}>
+                      {ASSETS.map((a) => { const v = p[a.key] || 0, s = Math.max(1, assetsSum(p)); return v > 0 ? <div key={a.key} style={{ width: `${(v / s) * 100}%`, background: a.color }} /> : null; })}
                     </div>
                   </div>
-                  <div style={{ display: "flex", height: 8, borderRadius: 6, overflow: "hidden", marginTop: 10, background: "#eceaf3" }}>
-                    {ASSETS.map((a) => { const v = p[a.key] || 0, s = Math.max(1, assetsSum(p)); return v > 0 ? <div key={a.key} style={{ width: `${(v / s) * 100}%`, background: a.color }} /> : null; })}
-                  </div>
-                </div>
-              );
-            })}
-          </div>
-        )}
-      </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
       )}
 
       {pickNews && (
         <div onClick={() => setPickNews(false)} style={{ position: "fixed", inset: 0, background: "#000a", display: "grid", placeItems: "center", padding: 16, zIndex: 50 }}>
-          <div onClick={(e) => e.stopPropagation()} style={{ background: C.panel, border: `1px solid ${C.line}`, borderRadius: 18, padding: 18, width: "100%", maxWidth: 480 }}>
-            <Title size={22}>📰 어떤 속보를 띄울까요?</Title>
-            <div style={{ marginTop: 10 }}><Btn fill color={C.red} full onClick={() => { release(); setPickNews(false); }}>🎲 랜덤 속보!</Btn></div>
-            <div style={{ maxHeight: 340, overflow: "auto", marginTop: 12, display: "grid", gap: 6 }}>
-              {EVENTS.map((e) => (
-                <button key={e.id} onClick={() => { release(e.id); setPickNews(false); }} style={{ textAlign: "left", background: C.panel2, border: `1px solid ${C.line}`, borderRadius: 10, padding: 10, color: C.text, cursor: "pointer" }}>
-                  <span style={{ color: CAT[e.cat], fontSize: 11, fontWeight: 800 }}>{e.icon} {e.cat}{e.rateDelta ? ` · 금리${e.rateDelta > 0 ? "▲" : "▼"}` : ""}{e.swan ? " · 블랙스완" : ""}</span>
-                  <div style={{ fontWeight: 800, fontSize: 13, marginTop: 2 }}>{e.title}</div>
-                </button>
-              ))}
+          <div onClick={(e) => e.stopPropagation()} style={{ background: C.panel, border: `1px solid ${C.line}`, borderRadius: 18, padding: 18, width: "100%", maxWidth: 520, maxHeight: "88vh", display: "flex", flexDirection: "column" }}>
+            <Title size={22}>📰 속보 고르기 (최대 2개)</Title>
+            <p style={{ color: C.sub, fontSize: 12, margin: "4px 0 0" }}>여러 개 고르면 동시에 터집니다. 선택 <b style={{ color: C.gold }}>{sel.length}</b>/2</p>
+            <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
+              <Btn small color={C.gold} onClick={() => { release([]); setPickNews(false); }}>🎲 랜덤 1개</Btn>
+              <Btn small fill color={C.red} disabled={sel.length === 0} onClick={() => { release(sel); setPickNews(false); }}>▶ 선택한 속보 띄우기 ({sel.length})</Btn>
+            </div>
+            <div style={{ overflow: "auto", marginTop: 12, display: "grid", gap: 6 }}>
+              {Object.keys(CAT).map((cat) => {
+                const evs = EVENTS.filter((e) => e.cat === cat);
+                if (!evs.length) return null;
+                return (
+                  <div key={cat}>
+                    <div style={{ fontSize: 11, fontWeight: 800, color: CAT[cat], margin: "6px 2px 2px" }}>{cat}</div>
+                    <div style={{ display: "grid", gap: 6 }}>
+                      {evs.map((e) => {
+                        const on = sel.includes(e.id);
+                        return (
+                          <button key={e.id} onClick={() => toggleSel(e.id)}
+                            style={{ textAlign: "left", background: on ? "#fff7e6" : C.panel2, border: `2px solid ${on ? C.gold : C.line}`, borderRadius: 10, padding: 10, color: C.text, cursor: "pointer", display: "flex", gap: 8, alignItems: "center" }}>
+                            <span style={{ fontSize: 16 }}>{on ? "✅" : e.icon}</span>
+                            <div style={{ flex: 1 }}>
+                              <div style={{ fontWeight: 800, fontSize: 13 }}>{e.title}</div>
+                              <div style={{ fontSize: 10.5, color: C.sub }}>{e.rateDelta ? `금리${e.rateDelta > 0 ? "▲" : "▼"} · ` : ""}{e.swan ? "블랙스완 · " : ""}{e.ticker || ""}</div>
+                            </div>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                );
+              })}
             </div>
           </div>
         </div>
