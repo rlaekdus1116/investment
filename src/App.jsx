@@ -80,7 +80,7 @@ const ALLOC = [
   { key: "stock", name: "주식", emoji: "📈", color: "#34d399", hint: "중위험 · 배당 · 자유롭게 매매", sell: true },
   { key: "bond", name: "채권", emoji: "📃", color: "#0ea5e9", hint: "이자 받는 안전자산 · 금리 오르면 값↓", sell: true },
   { key: "savings", name: "적금", emoji: "🏦", color: "#60a5fa", hint: "안전·이자 · 자유롭게 조정", sell: true },
-  { key: "pension", name: "연금", emoji: "🧓", color: "#eab308", hint: "노후 대비 장기저축 · 아주 안전 · 못 팜(장기)", sell: false },
+  { key: "pension", name: "연금", emoji: "🧓", color: "#eab308", hint: "노후 대비 장기저축 · 아주 안전 · 못 팜(빚 갚기에도 못 씀)", sell: false },
   { key: "realestate", name: "부동산", emoji: "🏠", color: "#f472b6", hint: "인플레 방어 · 팔 순 있지만 급할 땐 현금화 어려움", sell: true },
   { key: "luxury", name: "명품", emoji: "👜", color: "#c084fc", hint: "감가 위험 · 리셀 대박도 · 매매 가능", sell: true },
   { key: "parents", name: "부모님 용돈", emoji: "🎁", color: "#fb7185", hint: "효도지수↑ (가끔 목돈 보답) · 못 무름", sell: false },
@@ -321,9 +321,12 @@ function startRound(prev, round, rate) {
   p.checking = (p.checking || 0) + net;
   let deficitToLoan = 0;
   if (p.checking < 0) { deficitToLoan = -p.checking; p.loan = (p.loan || 0) + deficitToLoan; p.checking = 0; }
+  // 빚이 있으면 남는 현금으로 자동 상환 (돈 있으면 빚부터 갚아짐)
+  let autoRepay = 0;
+  if ((p.loan || 0) > 0 && p.checking > 0) { autoRepay = Math.min(p.checking, p.loan); p.checking -= autoRepay; p.loan -= autoRepay; }
   p.age = age; p.round = round; p.retired = retired; p.rate = rate;
   p.lastSalaryAmt = work; p.lastSalaryRound = round; p.ready = false;
-  p.income = { work, retired, dividend, grow, savInt, bondInt, penInt, living, loanInt, premium, net, deficitToLoan };
+  p.income = { work, retired, dividend, grow, savInt, bondInt, penInt, living, loanInt, premium, net, deficitToLoan, autoRepay };
   return p;
 }
 
@@ -475,6 +478,11 @@ function BudgetModal({ data, onClose }) {
           {inc.grow > 0 && (
             <div style={{ marginTop: 10, background: "#e8f8f1", color: C.green, borderRadius: 12, padding: "10px 12px", fontSize: 13, fontWeight: 700 }}>
               🏦 이자·쿠폰으로 <b>적금·채권·연금이 +{fmt(inc.grow)}</b> 스스로 불어났어요! (안전자산의 힘 💪)
+            </div>
+          )}
+          {inc.autoRepay > 0 && (
+            <div style={{ marginTop: 10, background: "#eef3ff", color: C.blue, borderRadius: 12, padding: "10px 12px", fontSize: 13, fontWeight: 700 }}>
+              💳 남는 현금으로 <b>빚 {fmt(inc.autoRepay)}</b>을 자동으로 갚았어요! (더 갚으려면 자산을 파세요)
             </div>
           )}
           {inc.deficitToLoan > 0 && (
@@ -634,6 +642,25 @@ function PlayGame({ mode, onBack }) {
 
   const revealed = rec.lastResult && rec.lastResult.round === round;
   const stage = stageForAge(rec.age);
+  const swapCard = isClass && (step === "invest" || step === "waiting") ? (
+    (rec.swaps || 0) >= 2 ? (
+      <div style={{ width: "100%", marginBottom: 12, borderRadius: 14, padding: 12, background: C.panel2, border: `2px solid ${C.line}`, display: "flex", alignItems: "center", gap: 10, color: C.sub }}>
+        <span style={{ fontSize: 24 }}>🔀</span>
+        <div style={{ flex: 1, fontSize: 13, fontWeight: 700 }}>인생 바꾸기 2회 모두 사용했어요 (더 못 바꿔요)</div>
+      </div>
+    ) : (
+      <button onClick={toggleSwap}
+        style={{ width: "100%", marginBottom: 12, cursor: "pointer", borderRadius: 14, padding: 12, textAlign: "left",
+          background: rec.wantSwap ? "#f3e8ff" : "#faf5ff", border: `2px solid ${rec.wantSwap ? "#a855f7" : "#d8b4fe"}`, display: "flex", alignItems: "center", gap: 10 }}>
+        <span style={{ fontSize: 26 }}>🔀</span>
+        <div style={{ flex: 1 }}>
+          <div style={{ fontFamily: "'Black Han Sans'", color: "#9333ea", fontSize: 15 }}>인생 바꾸기 {rec.wantSwap ? "신청됨 ✓" : "신청하기"} <span style={{ fontSize: 11, color: C.sub, fontWeight: 500 }}>({rec.swaps || 0}/2회)</span></div>
+          <div style={{ fontSize: 11, color: C.sub }}>신청한 친구들끼리 인생(재산·직업)을 통째로 랜덤 교환! 다연쌤이 실행해요.</div>
+        </div>
+        <span style={{ fontSize: 13, fontWeight: 800, color: rec.wantSwap ? "#9333ea" : C.sub }}>{rec.wantSwap ? "ON" : "OFF"}</span>
+      </button>
+    )
+  ) : null;
   return (
     <div className="msWrap">
       <BudgetModal data={budget} onClose={() => setBudget(null)} />
@@ -646,6 +673,7 @@ function PlayGame({ mode, onBack }) {
           {(rec.history || []).length >= 2 && <NetWorthChart history={rec.history} />}
         </div>
         <div style={{ width: "100%", maxWidth: 640, justifySelf: "center" }}>
+          {swapCard}
           {step === "invest" && <InvestScreen rec={rec} onSubmit={confirmInvest} onChangeJob={() => setStep("rejob")} onShowBudget={() => openBudget(rec)} />}
 
           {step === "waiting" && (
@@ -663,27 +691,6 @@ function PlayGame({ mode, onBack }) {
                 <div style={{ fontWeight: 900, marginTop: 6, fontSize: 18, color: C.red }}>속보 발생!</div>
                 <div style={{ color: C.sub, fontSize: 13, marginTop: 6 }}>팝업에서 뉴스를 확인하고 결과를 눌러요.</div>
               </div>
-          )}
-
-          {/* 인생 바꾸기 신청 (수업 · 투자/대기 중 · 1인당 최대 2회) */}
-          {isClass && (step === "invest" || step === "waiting") && (
-            (rec.swaps || 0) >= 2 ? (
-              <div style={{ width: "100%", marginTop: 12, borderRadius: 14, padding: 12, background: C.panel2, border: `2px solid ${C.line}`, display: "flex", alignItems: "center", gap: 10, color: C.sub }}>
-                <span style={{ fontSize: 24 }}>🔀</span>
-                <div style={{ flex: 1, fontSize: 13, fontWeight: 700 }}>인생 바꾸기 2회 모두 사용했어요 (더 못 바꿔요)</div>
-              </div>
-            ) : (
-              <button onClick={toggleSwap}
-                style={{ width: "100%", marginTop: 12, cursor: "pointer", borderRadius: 14, padding: 12, textAlign: "left",
-                  background: rec.wantSwap ? "#f3e8ff" : C.panel2, border: `2px solid ${rec.wantSwap ? "#a855f7" : C.line}`, display: "flex", alignItems: "center", gap: 10 }}>
-                <span style={{ fontSize: 24 }}>🔀</span>
-                <div style={{ flex: 1 }}>
-                  <div style={{ fontWeight: 900, color: rec.wantSwap ? "#9333ea" : C.text }}>인생 바꾸기 {rec.wantSwap ? "신청됨 ✓" : "신청하기"} <span style={{ fontSize: 11, color: C.sub, fontWeight: 500 }}>({rec.swaps || 0}/2회)</span></div>
-                  <div style={{ fontSize: 11, color: C.sub }}>신청한 친구들끼리 인생(재산·직업)을 통째로 랜덤 교환! 다연쌤이 실행해요.</div>
-                </div>
-                <span style={{ fontSize: 12, fontWeight: 800, color: rec.wantSwap ? "#9333ea" : C.sub }}>{rec.wantSwap ? "ON" : "OFF"}</span>
-              </button>
-            )
           )}
         </div>
       </div>
@@ -848,8 +855,10 @@ function InvestScreen({ rec, onSubmit, onChangeJob, onShowBudget }) {
   const maxRepay = Math.min(rec.loan || 0, Math.max(0, pool - used)); // 자산 판 돈까지 상환에 쓸 수 있음
   const repayEff = Math.min(repay, maxRepay);
   const residual = pool - used - repayEff; // 통장에 남는 현금
-  const floors = { pension: rec.pension || 0, parents: rec.parents || 0 };
+  const floors = { pension: rec.pension || 0, parents: rec.parents || 0 }; // 연금·부모님용돈은 못 팜(장기)
   const okFloors = (t.pension || 0) >= floors.pension && (t.parents || 0) >= floors.parents;
+  const locked = (rec.pension || 0) + (rec.parents || 0); // 못 파는 돈
+  const usable = pool - locked; // 지금 실제로 굴릴 수 있는 돈
   const valid = residual >= 0 && okFloors;
   const setVal = (k, v) => { const fl = floors[k] || 0; setT((p) => ({ ...p, [k]: Math.max(fl, Math.min(Math.max(0, pool), Math.round(v))) })); };
 
@@ -859,7 +868,18 @@ function InvestScreen({ rec, onSubmit, onChangeJob, onShowBudget }) {
         <SectionLabel>💼 자산 사고팔기 (리밸런싱)</SectionLabel>
         <button onClick={onShowBudget} style={{ background: "transparent", border: `1px solid ${C.line}`, borderRadius: 8, padding: "4px 10px", color: C.sub, fontSize: 12, cursor: "pointer" }}>가계부 다시보기</button>
       </div>
-      <p style={{ color: C.sub, fontSize: 11.5, margin: "4px 0 0" }}>슬라이더를 <b>올리면 사기 / 내리면 팔기</b>. 남는 돈은 자동으로 💳통장에 담겨요. (연금·부모님용돈은 못 팜)</p>
+      <p style={{ color: C.sub, fontSize: 11.5, margin: "4px 0 0" }}>슬라이더를 <b>올리면 사기 / 내리면 팔기</b>. 남는 돈은 자동으로 💳통장에 담겨요. (🔒연금·부모님용돈은 못 팜 = 빚 갚기에도 못 써요)</p>
+
+      {/* 보험 (맨 위 · 잘 보이게) */}
+      <button onClick={() => setInsured((v) => !v)}
+        style={{ width: "100%", textAlign: "left", cursor: "pointer", marginTop: 10, background: insured ? "#e8f8f1" : "#fff7ed", border: `2px solid ${insured ? C.green : "#fdba74"}`, borderRadius: 12, padding: 12, display: "flex", alignItems: "center", gap: 10 }}>
+        <span style={{ fontSize: 26 }}>{insured ? "🛡️" : "🩹"}</span>
+        <div style={{ flex: 1 }}>
+          <div style={{ fontFamily: "'Black Han Sans'", fontSize: 15, color: insured ? C.green : "#c2410c" }}>보험 {insured ? "가입 중 ✓" : "미가입 — 눌러서 가입!"}</div>
+          <div style={{ fontSize: 11.5, color: C.sub }}>매 해 {fmt(INS_PREMIUM)} 내고, 블랙스완(큰 병·사고·화재)의 <b>약 90% 피해를 막아요</b></div>
+        </div>
+        <span style={{ fontSize: 13, fontWeight: 800, color: insured ? C.green : "#c2410c" }}>{insured ? "ON ✓" : "OFF"}</span>
+      </button>
 
       {/* 통장(현금) 잔액 */}
       <div style={{ marginTop: 10, borderRadius: 12, padding: "10px 14px", border: `2px solid ${residual < 0 ? C.red : C.green}`, background: residual < 0 ? "#fdeceb" : "#e8f8f1", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
@@ -868,20 +888,9 @@ function InvestScreen({ rec, onSubmit, onChangeJob, onShowBudget }) {
           <div style={{ fontFamily: "'Black Han Sans'", fontSize: 20, color: residual < 0 ? C.red : C.green }}>{fmt(Math.max(0, residual))}</div>
         </div>
         <div style={{ fontSize: 11.5, fontWeight: 700, color: residual < 0 ? C.red : C.sub, textAlign: "right" }}>
-          {residual < 0 ? `⚠️ ${fmt(-residual)} 초과! 줄여요` : `굴릴 수 있는 총액 ${fmt(pool)}`}
+          {residual < 0 ? `⚠️ ${fmt(-residual)} 초과! 줄여요` : <>지금 쓸 수 있는 돈<br /><b style={{ color: C.gold }}>{fmt(usable)}</b>{locked > 0 && <span style={{ color: C.sub }}> (🔒연금·용돈 {fmt(locked)} 제외)</span>}</>}
         </div>
       </div>
-
-      {/* 보험 */}
-      <button onClick={() => setInsured((v) => !v)}
-        style={{ width: "100%", textAlign: "left", cursor: "pointer", marginTop: 10, background: insured ? "#e8f8f1" : C.panel2, border: `2px solid ${insured ? C.green : C.line}`, borderRadius: 12, padding: 12, display: "flex", alignItems: "center", gap: 10 }}>
-        <span style={{ fontSize: 24 }}>{insured ? "🛡️" : "🩹"}</span>
-        <div style={{ flex: 1 }}>
-          <div style={{ fontWeight: 900, color: insured ? C.green : C.text }}>보험 {insured ? "가입 중" : "미가입"}</div>
-          <div style={{ fontSize: 11.5, color: C.sub }}>매 해 {fmt(INS_PREMIUM)} 내고, 블랙스완(큰 병·사고·화재)의 <b>약 90% 피해를 막아요</b></div>
-        </div>
-        <span style={{ fontSize: 13, fontWeight: 800, color: insured ? C.green : C.sub }}>{insured ? "ON ✓" : "OFF"}</span>
-      </button>
 
       {/* 레버리지 */}
       {(maxNewLoan > 0 || (rec.loan || 0) > 0) && (
